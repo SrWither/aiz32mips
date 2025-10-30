@@ -1,0 +1,7 @@
+[workspace]
+members = ["aiz32mips_core", "aiz32mips_emu"]
+resolver = "3"
+
+[workspace.dependencies]
+anyhow = "1.0"
+sdl2 = "0.38"

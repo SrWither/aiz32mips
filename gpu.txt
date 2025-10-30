@@ -1,0 +1,160 @@
+──────────────────────────────────────────────
+AIZ-32 GPU MMIO DOCUMENTATION
+──────────────────────────────────────────────
+
+Base address:  0x1F802000
+Framebuffer:   VRAM base 0x10000000
+
+La GPU es un dispositivo MMIO accesible mediante registros mapeados en memoria.
+Todos los accesos se realizan con operaciones de lectura/escritura de 8, 16 o 32 bits.
+Los comandos gráficos se envían mediante un FIFO y un registro de comando.
+
+──────────────────────────────────────────────
+REGISTROS MMIO
+──────────────────────────────────────────────
+
+Offset | Nombre       | Tamaño | Descripción
+-------|---------------|--------|---------------------------------------------
+0x00   | REG_WIDTH     | 16-bit | Ancho del framebuffer en píxeles
+0x02   | REG_HEIGHT    | 16-bit | Alto del framebuffer en píxeles
+0x04   | REG_PITCH     | 16-bit | Cantidad de píxeles por línea (normalmente igual a WIDTH)
+0x06   | REG_BPP       | 8-bit  | Bits por píxel (actualmente soportado: 32)
+0x08   | REG_FBADDR    | 32-bit | Offset dentro de VRAM donde comienza el framebuffer
+0x0C   | REG_STATUS    | 32-bit | Bit 0 = BUSY. Indica si la GPU está ejecutando un comando
+0x10   | REG_CMD16     | 16-bit | Registro de comando: escribir aquí ejecuta el comando
+0x12   | REG_PARAM16   | 16-bit | Registro de parámetro FIFO (push de 16 bits por vez)
+0x20   | REG_FONTADDR  | 32-bit | Dirección base del font bitmap (opcional)
+0x24   | REG_FONTW/H   | 8-bit  | Ancho / alto del carácter
+0x28   | REG_PALETTE   | 32-bit | Dirección base de paleta (no implementado)
+
+──────────────────────────────────────────────
+FORMATO DE PIXELES
+──────────────────────────────────────────────
+El framebuffer usa formato ARGB8888 en little-endian:
+byte0 = Blue, byte1 = Green, byte2 = Red, byte3 = Alpha
+
+──────────────────────────────────────────────
+FIFO DE PARÁMETROS
+──────────────────────────────────────────────
+Cada escritura de 16 bits en REG_PARAM16 se encola en un FIFO interno.
+Los comandos consumen sus parámetros en el orden de inserción.
+Para enviar valores de 32 bits, escribir primero el low-word y luego el high-word.
+
+──────────────────────────────────────────────
+LISTA DE COMANDOS
+──────────────────────────────────────────────
+
+0x0001 – CLEAR(color)
+    Limpia todo el framebuffer con el color especificado.
+    Parámetros:
+        color (u32) – color ARGB8888
+
+0x0002 – GRAD_X(left, right)
+    Rellena el framebuffer con un gradiente horizontal.
+    Parámetros:
+        left (u32)  – color en el borde izquierdo
+        right (u32) – color en el borde derecho
+
+0x0007 – GRAD_Y(top, bottom)
+    Rellena el framebuffer con un gradiente vertical.
+    Parámetros:
+        top (u32)    – color superior
+        bottom (u32) – color inferior
+
+0x000B – GRAD_XY(c00, c10, c01, c11)
+    Genera un gradiente bilineal usando los 4 colores de las esquinas.
+    Parámetros:
+        c00 (u32) – top-left
+        c10 (u32) – top-right
+        c01 (u32) – bottom-left
+        c11 (u32) – bottom-right
+
+0x0006 – FILLRECT(x, y, w, h, color)
+    Dibuja un rectángulo sólido.
+    Parámetros:
+        x, y, w, h (u16)
+        color (u32)
+
+0x0008 – RECT_OUTLINE(x, y, w, h, color)
+    Dibuja solo el contorno del rectángulo.
+    Parámetros:
+        x, y, w, h (u16)
+        color (u32)
+
+0x0009 – LINE(x0, y0, x1, y1, color)
+    Dibuja una línea (Bresenham).
+    Parámetros:
+        x0, y0, x1, y1 (u16)
+        color (u32)
+
+0x0003 – PUTCHAR(x, y, ch, fg, bg)
+    Dibuja un carácter usando el bitmap de fuente actual.
+    Parámetros:
+        x, y (u16)
+        ch (u16)
+        fg, bg (u32)
+
+0x0004 – PUTS(x, y, len, fg, bg, [chars...])
+    Escribe una cadena de caracteres consecutivos.
+    Los caracteres se envían al FIFO antes del comando.
+    Parámetros:
+        x, y (u16)
+        len (u16)
+        fg, bg (u32)
+        [len × u16] caracteres a dibujar
+
+0x000A – BLIT(src_addr, src_w, src_h, dst_x, dst_y)
+    Copia un bloque ARGB8888 desde VRAM a framebuffer.
+    Parámetros:
+        src_addr (u32)
+        src_w, src_h, dst_x, dst_y (u16)
+
+0x0005 – BLIT_TILEMAP(...)
+    Stub para mapas de tiles (no implementado)
+
+──────────────────────────────────────────────
+USO EN C
+──────────────────────────────────────────────
+
+#define GPU_MMIO_BASE  0x1F802000
+#define REG_WIDTH      (*(volatile unsigned short*)(GPU_MMIO_BASE + 0x00))
+#define REG_HEIGHT     (*(volatile unsigned short*)(GPU_MMIO_BASE + 0x02))
+#define REG_PITCH      (*(volatile unsigned short*)(GPU_MMIO_BASE + 0x04))
+#define REG_BPP        (*(volatile unsigned char *)(GPU_MMIO_BASE + 0x06))
+#define REG_FBADDR     (*(volatile unsigned int  *)(GPU_MMIO_BASE + 0x08))
+#define REG_CMD16      (*(volatile unsigned short*)(GPU_MMIO_BASE + 0x10))
+#define REG_PARAM16    (*(volatile unsigned short*)(GPU_MMIO_BASE + 0x12))
+
+// helpers
+static inline void gpu_param_u8(int i, unsigned char v) { *(volatile unsigned char*)(GPU_MMIO_BASE + 0x12 + i) = v; }
+static inline void gpu_cmd_u8(int i, unsigned char v) { *(volatile unsigned char*)(GPU_MMIO_BASE + 0x10 + i) = v; }
+static inline void gpu_param_u16(unsigned short v) { gpu_param_u8(0,v&0xFF); gpu_param_u8(1,v>>8); }
+static inline void gpu_param_u32(unsigned int v) { gpu_param_u16(v&0xFFFF); gpu_param_u16(v>>16); }
+static inline void gpu_cmd(unsigned short c) { gpu_cmd_u8(0,c&0xFF); gpu_cmd_u8(1,c>>8); }
+
+// ejemplo: gradiente XY
+void _start() {
+    REG_WIDTH  = 320;
+    REG_HEIGHT = 200;
+    REG_PITCH  = 320;
+    REG_BPP    = 32;
+    REG_FBADDR = 0;
+
+    gpu_param_u32(0xFF3030C0); // top-left
+    gpu_param_u32(0xFFC050C0); // top-right
+    gpu_param_u32(0xFF30C080); // bottom-left
+    gpu_param_u32(0xFFF5D060); // bottom-right
+    gpu_cmd(0x000B);
+
+    while (1) {}
+}
+
+──────────────────────────────────────────────
+NOTAS
+──────────────────────────────────────────────
+• Todos los comandos son síncronos: el bit 0 de STATUS indica si la GPU está ocupada.
+• El formato de color es ARGB8888, little-endian.
+• El framebuffer se encuentra en VRAM_BASE + REG_FBADDR.
+• Futuros comandos pueden incluir BLEND, SPRITE y TILEMAP.
+
+──────────────────────────────────────────────

@@ -1,0 +1,9 @@
+[package]
+name = "aiz32mips_emu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aiz32mips_core = { path = "../aiz32mips_core" }
+sdl2 = { workspace = true }
+anyhow = { workspace = true }
