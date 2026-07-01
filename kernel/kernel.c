@@ -3,16 +3,7 @@
 #include "keyboard.h"
 #include "kernel.h"
 
-// Emite un syscall real (en vez de llamar console_putc directo) para que
-// el primer prompt "> " sirva de prueba end-to-end de todo el pipeline de
-// excepciones: SYSCALL -> exception_entry -> kernel_trap -> handle_syscall.
-static inline void sys_putc(char c) {
-    register u32 r4 __asm__("$4") = (u32)(unsigned char)c;
-    register u32 r2 __asm__("$2") = SYS_PUTC;
-    __asm__ volatile("syscall" : : "r"(r4), "r"(r2) : "memory");
-}
-
-static const char *exc_name(u32 code) {
+const char *exc_name(u32 code) {
     switch (code) {
         case EXC_INT: return "Int";
         case EXC_MOD: return "Mod";
@@ -80,6 +71,10 @@ void kernel_main(void) {
     // habilita interrupciones: IE + IM2 (teclado) + IM7 (timer)
     cop0_write_status(STATUS_BEV | STATUS_IE | STATUS_IM2 | STATUS_IM7);
 
+    shell_init();
+    // sys_putc (no console_putc directo): el primer prompt "> " sirve de
+    // prueba end-to-end de todo el pipeline de excepciones: SYSCALL ->
+    // exception_entry -> kernel_trap -> handle_syscall.
     sys_putc('>');
     sys_putc(' ');
     console_flush();

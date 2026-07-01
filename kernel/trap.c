@@ -6,6 +6,29 @@
 
 static volatile u32 ticks = 0;
 
+// Reescribe el frame para que el eret de exception_entry aterrice de vuelta
+// en el shell del kernel, como si enter_user_mode() (boot.S) hubiera hecho
+// un return normal. La usan tanto SYS_EXIT (salida limpia) como el
+// aislamiento de fallos de kernel_trap (proceso que se cayó solo).
+static void return_to_kernel(TrapFrame *tf) {
+    tf->epc = g_kexit_pc;
+    tf->sp = g_kexit_sp;
+    // callee-saved: lo que el proceso de usuario haya dejado en estos
+    // registros (p.ej. $16 como puntero de su propio loop) no puede quedar
+    // pisando el contexto del kernel al que volvemos.
+    tf->s0 = g_kexit_ctx[0];
+    tf->s1 = g_kexit_ctx[1];
+    tf->s2 = g_kexit_ctx[2];
+    tf->s3 = g_kexit_ctx[3];
+    tf->s4 = g_kexit_ctx[4];
+    tf->s5 = g_kexit_ctx[5];
+    tf->s6 = g_kexit_ctx[6];
+    tf->s7 = g_kexit_ctx[7];
+    tf->gp = g_kexit_ctx[8];
+    tf->fp = g_kexit_ctx[9];
+    tf->status &= ~STATUS_KSU_MASK;
+}
+
 static void handle_syscall(TrapFrame *tf) {
     switch (tf->v0) {
         case SYS_PUTC:
@@ -24,8 +47,8 @@ static void handle_syscall(TrapFrame *tf) {
             }
             break;
         case SYS_EXIT:
-            kpanic(tf, "SYS_EXIT: sin scheduler todavia, no hay a donde volver");
-            break;
+            return_to_kernel(tf);
+            return; // sin el epc+=4 de abajo: ya apunta donde corresponde
         default:
             console_puts("[trap] syscall desconocida: ");
             console_put_uint(tf->v0);
@@ -51,9 +74,15 @@ void keyboard_irq(void) {
     while (kbd_has_event()) {
         u32 ev = kbd_read_event();
         if (ev & KBD_EVT_KIND_TEXT) {
-            console_putc((char)(ev & 0xFF));
+            shell_input((char)(ev & 0xFF));
+        } else if (ev & KBD_EVT_PRESSED) {
+            // de las teclas crudas (flechas, etc.) sólo nos importan
+            // backspace y enter, que no llegan como texto traducido.
+            u32 keycode = ev & 0xFF;
+            if (keycode == 8 || keycode == 13) {
+                shell_input((char)keycode);
+            }
         }
-        // los eventos de tecla cruda (flechas, etc.) los ignora la consola
     }
     console_flush();
 }
@@ -67,6 +96,19 @@ static void handle_interrupt(TrapFrame *tf) {
     }
 }
 
+// Excepción no manejada (TLBL/TLBS/AdE/RI/Ov/...) con el proceso corriendo
+// en modo usuario: no es un bug del kernel, es el programa de usuario el
+// que se cayó. Lo matamos a él solo (mismo mecanismo que SYS_EXIT) en vez
+// de tirar todo el kernel abajo con kpanic.
+static void kill_user_process(TrapFrame *tf, u32 exc_code) {
+    console_putc('\n');
+    console_puts("[user] proceso terminado por excepcion: ");
+    console_puts(exc_name(exc_code));
+    console_putc('\n');
+    console_flush();
+    return_to_kernel(tf);
+}
+
 void kernel_trap(TrapFrame *tf) {
     u32 exc_code = (tf->cause & CAUSE_EXCCODE_MASK) >> CAUSE_EXCCODE_SHIFT;
 
@@ -78,7 +120,11 @@ void kernel_trap(TrapFrame *tf) {
             handle_syscall(tf);
             break;
         default:
-            kpanic(tf, "excepcion no manejada");
+            if ((tf->status & STATUS_KSU_MASK) == STATUS_KSU_USER) {
+                kill_user_process(tf, exc_code);
+            } else {
+                kpanic(tf, "excepcion no manejada");
+            }
             break;
     }
 }

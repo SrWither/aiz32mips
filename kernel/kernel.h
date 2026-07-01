@@ -9,12 +9,15 @@ typedef unsigned char u8;
 typedef unsigned short u16;
 typedef unsigned int u32;
 typedef int i32;
+#include "abi.h"
 #endif
 
 // ───────────────────────────── CP0 ─────────────────────────────────────
 #define STATUS_IE (1u << 0)
 #define STATUS_EXL (1u << 1)
 #define STATUS_ERL (1u << 2)
+#define STATUS_KSU_MASK (0x3u << 3)
+#define STATUS_KSU_USER (0x2u << 3) // Status.KSU=10: modo usuario
 #define STATUS_IM2 (1u << 10) // teclado
 #define STATUS_IM7 (1u << 15) // timer
 #define STATUS_BEV (1u << 22)
@@ -38,11 +41,6 @@ typedef int i32;
 #define EXC_CPU 11
 #define EXC_OV 12
 #define EXC_TR 13
-
-// ───────────────────────────── syscalls ────────────────────────────────
-#define SYS_PUTC 1
-#define SYS_GETC 2
-#define SYS_EXIT 3
 
 // Ciclos de Count entre interrupciones de timer.
 #define TICK_PERIOD 100000
@@ -77,6 +75,21 @@ static inline u32 cop0_read_count(void) {
 static inline void cop0_write_compare(u32 v) {
     __asm__ volatile("mtc0 %0, $11" : : "r"(v));
 }
+static inline void cop0_write_entryhi(u32 v) {
+    __asm__ volatile("mtc0 %0, $10" : : "r"(v));
+}
+static inline void cop0_write_entrylo0(u32 v) {
+    __asm__ volatile("mtc0 %0, $2" : : "r"(v));
+}
+static inline void cop0_write_entrylo1(u32 v) {
+    __asm__ volatile("mtc0 %0, $3" : : "r"(v));
+}
+static inline void cop0_write_pagemask(u32 v) {
+    __asm__ volatile("mtc0 %0, $5" : : "r"(v));
+}
+static inline void cop0_tlbwi(void) {
+    __asm__ volatile("tlbwi");
+}
 
 // console.c
 void console_init(void);
@@ -91,9 +104,30 @@ void kernel_trap(TrapFrame *tf);
 void keyboard_irq(void);
 void timer_tick(void);
 
+// shell.c
+void shell_init(void);
+void shell_input(char c);
+
+// mm.c
+u32 pmm_alloc_page(void);
+void user_map_and_load(const u8 *img, u32 img_len);
+
+// boot.S: nunca retorna directo. Antes de saltar a modo usuario guarda el
+// punto de retorno (ra/sp) y los registros "callee-saved" (s0-s7/gp/fp) de
+// quien llamó en g_kexit_*; el SYS_EXIT de trap.c reescribe el TrapFrame con
+// esos valores para "volver" de ahí como si hubiera sido un return normal.
+// Sin esto, lo que la app de usuario haya dejado en esos registros (p.ej.
+// $16 usado como puntero en su propio loop) quedaría pisando el contexto
+// del kernel al que se vuelve.
+extern u32 g_kexit_pc;
+extern u32 g_kexit_sp;
+extern u32 g_kexit_ctx[10]; // s0..s7, gp, fp
+void enter_user_mode(u32 entry, u32 usp);
+
 // kernel.c
 void kernel_main(void);
 void kpanic(TrapFrame *tf, const char *msg);
+const char *exc_name(u32 code);
 
 #endif // __ASSEMBLER__
 

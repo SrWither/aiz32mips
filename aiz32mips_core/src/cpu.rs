@@ -616,13 +616,10 @@ impl CPU {
 
                         if cond {
                             if link {
-                                self.registers
-                                    .write(31, self.registers.get_pc().wrapping_add(4));
-                            } // PC+8
-                            let branch_target = self
-                                .registers
-                                .get_pc()
-                                .wrapping_add(((i.imm as i16 as i32) << 2) as u32);
+                                self.registers.write(31, pc_next.wrapping_add(4)); // PC+8
+                            }
+                            let branch_target =
+                                pc_next.wrapping_add(((i.imm as i16 as i32) << 2) as u32);
                             self.registers.special.pc = branch_target;
                         }
                         return 0;
