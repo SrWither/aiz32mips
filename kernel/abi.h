@@ -20,6 +20,13 @@
 #define SYS_GPU_SUBMIT 7
 #define SYS_GPU_STATUS 8
 #define SYS_FORK 9
+// Archivos: fd >= 3 (0/1/2 quedan reservados para un futuro stdin/stdout/
+// stderr, hoy sin usar — la consola sigue yendo por SYS_PUTC/SYS_GETC).
+// Ver kernel/fs.c: la tabla de descriptores y fs_open/fs_fd_*.
+#define SYS_OPEN 10
+#define SYS_READ 11
+#define SYS_WRITE 12
+#define SYS_CLOSE 13
 
 static inline void sys_putc(char c) {
     register unsigned int r4 __asm__("$4") = (unsigned int)(unsigned char)c;
@@ -93,6 +100,47 @@ static inline unsigned int sys_gpu_status(void) {
 static inline int sys_fork(void) {
     register unsigned int r2 __asm__("$2") = SYS_FORK;
     __asm__ volatile("syscall" : "+r"(r2) : : "memory");
+    return (int)r2;
+}
+
+// write_mode: 0 = lectura (el archivo tiene que existir), 1 = escritura
+// (crea/trunca recién al hacer sys_close, ver kernel/fs.c). Devuelve un
+// fd (>=3) o -1.
+static inline int sys_open(const char *path, int write_mode) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)path;
+    register unsigned int r5 __asm__("$5") = (unsigned int)write_mode;
+    register unsigned int r2 __asm__("$2") = SYS_OPEN;
+    __asm__ volatile("syscall" : "+r"(r2) : "r"(r4), "r"(r5) : "memory");
+    return (int)r2;
+}
+
+static inline int sys_read(int fd, void *buf, unsigned int len) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)fd;
+    register unsigned int r5 __asm__("$5") = (unsigned int)buf;
+    register unsigned int r6 __asm__("$6") = len;
+    register unsigned int r2 __asm__("$2") = SYS_READ;
+    __asm__ volatile("syscall" : "+r"(r2) : "r"(r4), "r"(r5), "r"(r6) : "memory");
+    return (int)r2;
+}
+
+// Escritura "parcial" al estilo write(2) real: puede devolver menos de
+// `len` si el buffer interno del fd (FS_WRITE_BUF_SIZE, ver fs.c) no
+// entra todo.
+static inline int sys_write(int fd, const void *buf, unsigned int len) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)fd;
+    register unsigned int r5 __asm__("$5") = (unsigned int)buf;
+    register unsigned int r6 __asm__("$6") = len;
+    register unsigned int r2 __asm__("$2") = SYS_WRITE;
+    __asm__ volatile("syscall" : "+r"(r2) : "r"(r4), "r"(r5), "r"(r6) : "memory");
+    return (int)r2;
+}
+
+// Si el fd se abrió para escribir, recién acá se vuelca de verdad al
+// disco (ver fs_fd_close).
+static inline int sys_close(int fd) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)fd;
+    register unsigned int r2 __asm__("$2") = SYS_CLOSE;
+    __asm__ volatile("syscall" : "+r"(r2) : "r"(r4) : "memory");
     return (int)r2;
 }
 

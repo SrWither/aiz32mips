@@ -124,11 +124,15 @@ void sched_wake(int pid) {
 // forzar un context switch acá mismo.
 void sched_kill_all_user(void) {
     for (int i = 1; i < MAX_PROCS; i++) {
+        if (proc_table[i].state != PROC_UNUSED) {
+            fs_close_all_owned_by(i); // si tenía un archivo abierto para escribir, lo vuelca antes de perderlo
+        }
         proc_table[i].state = PROC_UNUSED;
     }
 }
 
 void sched_exit_current(TrapFrame *tf) {
+    fs_close_all_owned_by(current_pid);
     // Sin guardar ctx: este proceso no vuelve, no tiene sentido.
     proc_table[current_pid].state = PROC_UNUSED;
     sched_switch_to(tf, sched_pick_next());

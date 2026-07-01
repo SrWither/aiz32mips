@@ -32,13 +32,13 @@ kernel.elf: $(OBJS) linker.ld
 kernel.bin: kernel.elf
 	$(OBJCOPY) -O binary $< $@
 
-# disk.img: FAT32 real (mkfs.vfat + mtools, no lo arma el kernel: el
-# write-path de FAT32 todavía no existe del lado del kernel, ver fs.c).
-# /bin lleva los .elf de userland tal cual salen del linker (sin objcopy a
-# .bin: en el disco los binarios son ELF de punta a punta). No es parte de
-# `all` a propósito: es un artefacto persistente ("el disco de verdad"),
-# regenerarlo es una acción explícita (`make disk.img`), no un efecto
-# colateral de compilar el kernel.
+# disk.img: FAT32 real (mkfs.vfat + mtools arman el estado inicial desde
+# el host; fs.c ya sabe escribir por su cuenta una vez que el kernel está
+# corriendo, ver fs_write). /bin lleva los .elf de userland tal cual salen
+# del linker (sin objcopy a .bin: en el disco los binarios son ELF de
+# punta a punta). No es parte de `all` a propósito: es un artefacto
+# persistente ("el disco de verdad"), regenerarlo es una acción explícita
+# (`make disk.img`), no un efecto colateral de compilar el kernel.
 disk.img: FORCE diskroot/home/readme.txt
 	$(MAKE) -C ../user
 	rm -f disk.img
@@ -49,6 +49,7 @@ disk.img: FORCE diskroot/home/readme.txt
 	mcopy -i disk.img ../user/ping.elf ::/bin/ping.elf
 	mcopy -i disk.img ../user/pingpong.elf ::/bin/pingpong.elf
 	mcopy -i disk.img ../user/cube3d.elf ::/bin/cube3d.elf
+	mcopy -i disk.img ../user/filetest.elf ::/bin/filetest.elf
 	mcopy -i disk.img diskroot/home/readme.txt ::/home/readme.txt
 	@echo "disk.img"
 

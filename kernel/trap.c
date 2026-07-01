@@ -69,6 +69,20 @@ static void handle_syscall(TrapFrame *tf) {
             // con el pid del hijo, o -1 si no había slot.
             tf->v0 = (u32)sched_fork(tf);
             break;
+        case SYS_OPEN:
+            // tf->a0 es un puntero kuseg del proceso (path): se puede leer
+            // directo, mismo motivo que en SYS_GPU_SUBMIT (ver abi.h).
+            tf->v0 = (u32)fs_open((const char *)tf->a0, (int)tf->a1, sched_current_pid());
+            break;
+        case SYS_READ:
+            tf->v0 = (u32)fs_fd_read((int)tf->a0, (u8 *)tf->a1, tf->a2);
+            break;
+        case SYS_WRITE:
+            tf->v0 = (u32)fs_fd_write((int)tf->a0, (const u8 *)tf->a1, tf->a2);
+            break;
+        case SYS_CLOSE:
+            tf->v0 = (u32)fs_fd_close((int)tf->a0);
+            break;
         case SYS_GPU_INIT:
             // A partir de acá el proceso es dueño de la pantalla (ver
             // gfx_owner_pid arriba): apaga el texto, que a partir de ahora

@@ -161,12 +161,22 @@ void sem_init(int idx, int value);
 int sem_wait(TrapFrame *tf, int idx);    // devuelve 1 si bloqueó
 void sem_signal(int idx);
 
-// fs.c: FAT32 de solo lectura sobre storage.h (montaje perezoso: recién
-// toca el device en el primer uso). Solo nombres cortos 8.3. Sin cwd propio
-// acá adentro: shell.c arma paths absolutos antes de llamar a estas.
+// fs.c: FAT32 sobre storage.h (montaje perezoso: recién toca el device en
+// el primer uso). Solo nombres cortos 8.3. Sin cwd propio acá adentro:
+// shell.c arma paths absolutos antes de llamar a estas.
 int fs_read(const char *path, u8 *buf, u32 maxlen); // bytes leídos, -1 si no existe o es directorio
+int fs_read_at(const char *path, u32 offset, u8 *buf, u32 maxlen); // idem, pero arrancando en offset
+int fs_write(const char *path, const u8 *data, u32 len); // crea/trunca; 0 ok, -1 si no se pudo
 void fs_list(const char *path);                     // imprime error si el path no es un directorio
 int fs_is_dir(const char *path);                     // 1/0/-1 (no existe), para cd
+
+// fs.c: descriptores de archivo para syscalls de userland (SYS_OPEN/READ/
+// WRITE/CLOSE, ver trap.c). fd >= FD_BASE(3); -1 en cualquier error.
+int fs_open(const char *path, int write_mode, int owner_pid);
+int fs_fd_read(int fd, u8 *buf, u32 maxlen);
+int fs_fd_write(int fd, const u8 *buf, u32 len);
+int fs_fd_close(int fd);
+void fs_close_all_owned_by(int pid); // la llaman sched_exit_current/sched_kill_all_user
 
 // kernel.c
 void kernel_main(void);

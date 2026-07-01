@@ -250,8 +250,7 @@ static void cmd_run(char *rest) {
     }
 }
 
-// cat <path>: imprime el contenido de un archivo (hasta 512 bytes). FAT32
-// es de solo lectura por ahora (ver fs.c), así que no hay "write" todavía.
+// cat <path>: imprime el contenido de un archivo (hasta 512 bytes).
 static void cmd_cat(char *rest) {
     if (rest[0] == 0) {
         console_puts("uso: cat <path>\n");
@@ -271,6 +270,28 @@ static void cmd_cat(char *rest) {
         console_putc((char)buf[i]);
     }
     console_putc('\n');
+}
+
+// write <path> <texto>: crea (o pisa, truncando) un archivo con el resto
+// de la línea como contenido — ahora persiste de verdad (ver fs.c: FAT32
+// ya soporta escritura).
+static void cmd_write(char *rest) {
+    char *content = split_first_space(rest);
+    if (rest[0] == 0) {
+        console_puts("uso: write <path> <texto>\n");
+        return;
+    }
+    char path[PATH_MAX];
+    resolve_path(path, sizeof(path), rest);
+    u32 len = 0;
+    while (content[len]) {
+        len++;
+    }
+    if (fs_write(path, (const u8 *)content, len) < 0) {
+        console_puts("no se pudo escribir: ");
+        console_puts(path);
+        console_putc('\n');
+    }
 }
 
 static void cmd_pwd(void) {
@@ -360,6 +381,8 @@ static void shell_dispatch(void) {
         fs_list(path);
     } else if (str_eq(cmd_buf, "cat")) {
         cmd_cat(rest);
+    } else if (str_eq(cmd_buf, "write")) {
+        cmd_write(rest);
     } else if (str_eq(cmd_buf, "pwd")) {
         cmd_pwd();
     } else if (str_eq(cmd_buf, "cd")) {
