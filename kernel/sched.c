@@ -10,6 +10,7 @@ typedef enum {
     PROC_UNUSED = 0,
     PROC_READY,
     PROC_RUNNING,
+    PROC_BLOCKED, // esperando un semáforo (sem.c); fuera de la rotación
 } proc_state_t;
 
 typedef struct {
@@ -47,6 +48,10 @@ void sched_init(void) {
     g_next_asid = 0;
 }
 
+int sched_current_pid(void) {
+    return current_pid;
+}
+
 // Ronda a partir de current_pid+1; si nadie más está listo, se queda con
 // el mismo (el slot 0 siempre está RUNNING o READY, nunca UNUSED).
 static int sched_pick_next(void) {
@@ -66,10 +71,34 @@ static void sched_switch_to(TrapFrame *tf, int next) {
     g_next_asid = (u32)next; // boot.S lo escribe en EntryHi al final
 }
 
-void sched_tick(TrapFrame *tf) {
+// Guarda el contexto actual con `leave_state` (READY si lo interrumpió el
+// timer, BLOCKED si se durmió en un semáforo) y pasa a correr el próximo
+// listo. Comparten esto sched_tick y sched_block_current: solo difieren en
+// qué estado le queda al que se va.
+static void sched_save_and_switch(TrapFrame *tf, proc_state_t leave_state) {
     tf_copy(&proc_table[current_pid].ctx, tf);
-    proc_table[current_pid].state = PROC_READY;
+    proc_table[current_pid].state = leave_state;
     sched_switch_to(tf, sched_pick_next());
+}
+
+void sched_tick(TrapFrame *tf) {
+    sched_save_and_switch(tf, PROC_READY);
+}
+
+// La usa sem_wait (sem.c) cuando el proceso actual tiene que dormirse:
+// a diferencia de sched_tick, quien llama ya dejó tf->epc apuntando
+// después del syscall (no hay que reejecutarlo cuando lo despierten).
+void sched_block_current(TrapFrame *tf) {
+    sched_save_and_switch(tf, PROC_BLOCKED);
+}
+
+// La usa sem_signal (sem.c): solo cambia el estado, no fuerza ningún
+// cambio de contexto — al que despierta lo agarra el scheduler en su
+// próximo turno de round-robin.
+void sched_wake(int pid) {
+    if (proc_table[pid].state == PROC_BLOCKED) {
+        proc_table[pid].state = PROC_READY;
+    }
 }
 
 void sched_exit_current(TrapFrame *tf) {
@@ -78,7 +107,7 @@ void sched_exit_current(TrapFrame *tf) {
     sched_switch_to(tf, sched_pick_next());
 }
 
-int sched_spawn(const u8 *img, u32 img_len) {
+int sched_spawn(const u8 *img, u32 img_len, u32 arg0) {
     int slot = -1;
     for (int i = 1; i < MAX_PROCS; i++) {
         if (proc_table[i].state == PROC_UNUSED) {
@@ -105,6 +134,7 @@ int sched_spawn(const u8 *img, u32 img_len) {
     for (u32 i = 0; i < sizeof(*ctx) / sizeof(u32); i++) {
         words[i] = 0;
     }
+    ctx->a0 = arg0; // "rol": la app lo lee declarando void _start(int role)
     ctx->sp = 0x00402000u; // tope del stack (página impar), crece hacia abajo
     ctx->epc = 0x00400000u;
     // EXL=1 acá también: el epílogo de exception_entry hace mtc0 del status

@@ -8,6 +8,8 @@
 #define SYS_PUTC 1
 #define SYS_GETC 2
 #define SYS_EXIT 3
+#define SYS_SEM_WAIT 4
+#define SYS_SEM_SIGNAL 5
 
 static inline void sys_putc(char c) {
     register unsigned int r4 __asm__("$4") = (unsigned int)(unsigned char)c;
@@ -29,6 +31,20 @@ static inline void sys_exit(void) {
     __asm__ volatile("syscall" : : "r"(r2) : "memory");
     for (;;) {
     }
+}
+
+// Bloquea (sin busy-wait: el kernel saca al proceso de la rotación del
+// scheduler) hasta que otro proceso haga sys_sem_signal(idx).
+static inline void sys_sem_wait(int idx) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)idx;
+    register unsigned int r2 __asm__("$2") = SYS_SEM_WAIT;
+    __asm__ volatile("syscall" : : "r"(r4), "r"(r2) : "memory");
+}
+
+static inline void sys_sem_signal(int idx) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)idx;
+    register unsigned int r2 __asm__("$2") = SYS_SEM_SIGNAL;
+    __asm__ volatile("syscall" : : "r"(r4), "r"(r2) : "memory");
 }
 
 #endif // AIZ_ABI_H

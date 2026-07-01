@@ -9,22 +9,21 @@ ELF_FMT   = elf32-little
 CFLAGS  = -target $(ARCH) -mips32 -ffreestanding -fno-pic -fno-builtin \
           -fomit-frame-pointer -G0 -O2 -nostdlib -static -Wall
 
-C_SRCS  = hello.c
-OBJS    = $(C_SRCS:.c=.o)
+PROGRAMS = hello pingpong
 
-all: hello.bin
+all: $(PROGRAMS:%=%.bin)
 
 %.o: %.c ../kernel/abi.h
 	$(CLANG) $(CFLAGS) -c $< -o $@
 
-hello.elf: $(OBJS) linker.ld
-	$(LD_LLD) -m $(LINK_FMT) -T linker.ld --oformat=$(ELF_FMT) -o $@ $(OBJS)
+%.elf: %.o linker.ld
+	$(LD_LLD) -m $(LINK_FMT) -T linker.ld --oformat=$(ELF_FMT) -o $@ $<
 	@echo "$@"
 
-hello.bin: hello.elf
+%.bin: %.elf
 	$(OBJCOPY) -O binary $< $@
 
 clean:
-	rm -f *.o hello.elf hello.bin
+	rm -f *.o $(PROGRAMS:%=%.elf) $(PROGRAMS:%=%.bin)
 
 .PHONY: all clean

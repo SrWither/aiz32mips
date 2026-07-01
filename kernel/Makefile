@@ -12,8 +12,8 @@ CFLAGS  = -target $(ARCH) -mips32 -ffreestanding -fno-pic -fno-builtin \
 ASFLAGS = -target $(ARCH) -mips32 -ffreestanding -fno-pic -G0 -nostdlib \
           -D__ASSEMBLER__ -I../aiz32mips_emu/data -c
 
-C_SRCS  = kernel.c console.c trap.c shell.c mm.c sched.c
-OBJS    = boot.o $(C_SRCS:.c=.o) hello_blob.o
+C_SRCS  = kernel.c console.c trap.c shell.c mm.c sched.c sem.c
+OBJS    = boot.o $(C_SRCS:.c=.o) hello_blob.o pingpong_blob.o
 
 all: kernel.elf
 
@@ -23,15 +23,19 @@ boot.o: boot.S kernel.h
 %.o: %.c kernel.h
 	$(CLANG) $(CFLAGS) -c $< -o $@
 
-# hello.bin: app de usuario embebida (ver embedded.h + shell.c), construida
-# standalone en ../user y copiada acá para que hello_blob.S la encuentre
-# como "hello.bin" (.incbin es relativo al directorio de compilación).
-hello.bin: FORCE
+# *.bin: apps de usuario embebidas (ver embedded.h + shell.c), construidas
+# standalone en ../user y copiadas acá para que *_blob.S las encuentre con
+# su nombre literal (.incbin es relativo al directorio de compilación).
+hello.bin pingpong.bin: FORCE
 	$(MAKE) -C ../user
 	cp ../user/hello.bin hello.bin
+	cp ../user/pingpong.bin pingpong.bin
 
 hello_blob.o: hello_blob.S hello.bin
 	$(CLANG) $(ASFLAGS) hello_blob.S -o hello_blob.o
+
+pingpong_blob.o: pingpong_blob.S pingpong.bin
+	$(CLANG) $(ASFLAGS) pingpong_blob.S -o pingpong_blob.o
 
 kernel.elf: $(OBJS) linker.ld
 	$(LD_LLD) -m $(LINK_FMT) -T linker.ld --oformat=$(ELF_FMT) -o $@ $(OBJS)
@@ -42,6 +46,6 @@ kernel.bin: kernel.elf
 
 clean:
 	$(MAKE) -C ../user clean
-	rm -f *.o kernel.elf kernel.bin hello.bin
+	rm -f *.o kernel.elf kernel.bin hello.bin pingpong.bin
 
 .PHONY: all clean FORCE

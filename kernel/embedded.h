@@ -7,5 +7,7 @@
 
 extern u8 _binary_hello_bin_start[];
 extern u8 _binary_hello_bin_end[];
+extern u8 _binary_pingpong_bin_start[];
+extern u8 _binary_pingpong_bin_end[];
 
 #endif // AIZ_EMBEDDED_H

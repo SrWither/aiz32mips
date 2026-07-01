@@ -26,6 +26,14 @@ static void handle_syscall(TrapFrame *tf) {
         case SYS_EXIT:
             sched_exit_current(tf);
             return; // sin el epc+=4 de abajo: ya apunta donde corresponde
+        case SYS_SEM_WAIT:
+            if (sem_wait(tf, (int)tf->a0)) {
+                return; // se durmió: tf ya es de otro proceso
+            }
+            break; // no bloqueó: sigue normal, epc+=4 de abajo
+        case SYS_SEM_SIGNAL:
+            sem_signal((int)tf->a0);
+            break;
         default:
             console_puts("[trap] syscall desconocida: ");
             console_put_uint(tf->v0);

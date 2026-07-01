@@ -123,9 +123,19 @@ void mm_map_user(u32 asid, u32 prog_phys, u32 stack_phys);
 // ver el comentario en sched.c para el por qué.
 extern u32 g_next_asid;
 void sched_init(void);
+int sched_current_pid(void);
 void sched_tick(TrapFrame *tf);       // preemption: la llama timer_tick
-int sched_spawn(const u8 *img, u32 img_len); // devuelve slot o -1
+void sched_block_current(TrapFrame *tf); // duerme al actual (sem_wait)
+void sched_wake(int pid);                // lo despierta (sem_signal)
+int sched_spawn(const u8 *img, u32 img_len, u32 arg0); // devuelve slot o -1
 void sched_exit_current(TrapFrame *tf);      // usan SYS_EXIT y el kill por fallo
+
+// sem.c: semáforos de Dijkstra (wait/signal), bloqueantes de verdad — sin
+// busy-wait, sched_block_current/sched_wake sacan y devuelven al proceso
+// de la rotación del scheduler.
+void sem_init(int idx, int value);
+int sem_wait(TrapFrame *tf, int idx);    // devuelve 1 si bloqueó
+void sem_signal(int idx);
 
 // kernel.c
 void kernel_main(void);
