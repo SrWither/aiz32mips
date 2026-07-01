@@ -5,21 +5,29 @@ use std::env;
 use std::fs;
 use std::process;
 
+use aiz32mips_core::cop::CAUSE_IP2;
 use aiz32mips_core::cpu::CPU;
 use aiz32mips_core::devices::gpu::{self, GpuMmio};
+use aiz32mips_core::devices::keyboard::KeyboardMmio;
 use aiz32mips_core::devices::vram::{new_shared_vram, GpuVram};
-use aiz32mips_core::devices::{ram::Ram, rom::Rom};
+use aiz32mips_core::devices::ram::Ram;
+use aiz32mips_core::elf;
 use aiz32mips_core::memory::MemoryBus;
 
 use mmio_offsets::*;
 use ui::display::SdlDisplay;
+
+const RAM_BASE: u32 = 0x0000_0000;
+const RAM_SIZE: usize = 0x0020_0000; // 2MB
+const ROM_BASE: u32 = 0x1FC0_0000;
+const ROM_SIZE: usize = 0x0010_0000; // 1MB (los .bin actuales entran de sobra)
 
 fn main() -> anyhow::Result<()> {
     // === args ===
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
         eprintln!(
-            "Uso: {} <rom_path.bin> <font_rom.bin> <ciclos|inf>",
+            "Uso: {} <rom_path.bin|.elf> <font_rom.bin> <ciclos|inf>",
             args[0]
         );
         process::exit(1);
@@ -28,17 +36,66 @@ fn main() -> anyhow::Result<()> {
     let font_rom_path = &args[2];
     let cycles_arg = &args[3];
 
-    // === rom ===
-    let rom_data = fs::read(rom_path)
+    // === imagen inicial de RAM/ROM ===
+    // Soporta tanto un .bin plano (comportamiento de siempre: se copia
+    // entero a la ROM en 0xBFC00000, arranca ahí) como un .elf real (cada
+    // PT_LOAD se copia a donde diga su dirección física resuelta — RAM o
+    // ROM según en qué segmento caiga — y arranca en e_entry).
+    let file_data = fs::read(rom_path)
         .map_err(|e| anyhow::anyhow!("Error al leer ROM '{}': {}", rom_path, e))?;
 
     let font_rom_data = fs::read(font_rom_path)
         .map_err(|e| anyhow::anyhow!("Error al leer ROM de fuentes '{}': {}", font_rom_path, e))?;
 
+    let mut ram_image = vec![0u8; RAM_SIZE];
+    let mut rom_image = vec![0u8; ROM_SIZE];
+    let mut entry_pc: Option<u32> = None;
+
+    if elf::is_elf(&file_data) {
+        let img = elf::parse_elf32(&file_data)
+            .map_err(|e| anyhow::anyhow!("ELF '{}' inválido: {:?}", rom_path, e))?;
+        println!(
+            "[AIZ32] '{}' es un ELF32/MIPS: entry={:#010X}, {} segmento(s) PT_LOAD",
+            rom_path,
+            img.entry,
+            img.segments.len()
+        );
+        for seg in &img.segments {
+            blit_segment(&mut ram_image, &mut rom_image, seg.paddr, &seg.data).map_err(|e| {
+                anyhow::anyhow!(
+                    "segmento ELF vaddr={:#010X} paddr={:#010X} (+{} bytes): {}",
+                    seg.vaddr,
+                    seg.paddr,
+                    seg.data.len(),
+                    e
+                )
+            })?;
+        }
+        entry_pc = Some(img.entry);
+    } else {
+        if file_data.len() > ROM_SIZE {
+            return Err(anyhow::anyhow!(
+                "'{}' ({} bytes) no entra en la ROM ({} bytes)",
+                rom_path,
+                file_data.len(),
+                ROM_SIZE
+            ));
+        }
+        rom_image[..file_data.len()].copy_from_slice(&file_data);
+    }
+
     // === bus ===
     let mut bus = MemoryBus::new(true); // little-endian
-    bus.add_device(Box::new(Ram::new(0x0000_0000, 0x0020_0000))); // 2MB
-    bus.add_device(Box::new(Rom::new(0x1FC0_0000, rom_data))); // BIOS
+    bus.add_device(Box::new(Ram::from_data(RAM_BASE, ram_image)));
+    // "ROM" de arranque, pero respaldada por Ram (escribible): el toolchain
+    // no separa .data/.bss del resto con un linker script real (no hay
+    // crt0 que copie nada a RAM al arrancar), así que el linker mete las
+    // variables globales/estáticas ahí mismo, contiguas al código. Con un
+    // device de sólo lectura esas escrituras se perdían en silencio (según
+    // la convención "escribir a ROM no hace nada"), rompiendo cualquier
+    // estado global mutable — p.ej. el cursor de una consola o el estado
+    // de teclas sostenidas de un sprite.
+    bus.add_device(Box::new(Ram::from_data(ROM_BASE, rom_image))); // BIOS
 
     // === GPU + VRAM ===
     // VRAM compartida entre el device de bus (para que el CPU le pueda
@@ -62,6 +119,9 @@ fn main() -> anyhow::Result<()> {
     bus.add_device(Box::new(vram_dev));
     bus.add_device(Box::new(gpu));
 
+    // === teclado ===
+    bus.add_device(Box::new(KeyboardMmio::new(KBD_MMIO_PHYS)));
+
     // Config inicial: 320x200, framebuffer único (sin double buffer todavía)
     write16(&mut bus, REG_FB_WIDTH, 320);
     write16(&mut bus, REG_FB_HEIGHT, 200);
@@ -72,6 +132,10 @@ fn main() -> anyhow::Result<()> {
 
     // === cpu ===
     let mut cpu = CPU::new();
+    if let Some(entry) = entry_pc {
+        cpu.registers.set_pc(entry);
+        cpu.registers.write(31, entry); // $ra: igual de "inofensivo" que en reset() si loopea para siempre
+    }
 
     // === sdl ===
     // present_from_bus ya no recorre la VRAM byte a byte por el bus (256k
@@ -99,8 +163,8 @@ fn main() -> anyhow::Result<()> {
     let mut steps_since_present = 0u32;
     let present_every = 10_000; // ajustá esto según rendimiento
 
-    // El polling de eventos (pump_events_quit) y el present van juntos,
-    // una vez cada `present_every` instrucciones — antes se llamaba
+    // El polling de eventos (pump_events) y el present van juntos, una vez
+    // cada `present_every` instrucciones — antes se llamaba
     // pump_events_quit() en CADA instrucción de CPU, creando un EventPump
     // nuevo y haciendo un poll de SDL/X11 millones de veces por segundo.
     // Eso, no el intérprete, era el cuello de botella real del "1 fps"
@@ -111,7 +175,7 @@ fn main() -> anyhow::Result<()> {
             steps_since_present += 1;
             if steps_since_present >= present_every {
                 steps_since_present = 0;
-                if sdl.pump_events_quit() {
+                if poll_input(&mut sdl, &mut bus, &mut cpu) {
                     break;
                 }
                 present_and_pulse_vblank(&mut sdl, &mut bus);
@@ -123,7 +187,7 @@ fn main() -> anyhow::Result<()> {
             steps_since_present += 1;
             if steps_since_present >= present_every {
                 steps_since_present = 0;
-                if sdl.pump_events_quit() {
+                if poll_input(&mut sdl, &mut bus, &mut cpu) {
                     break;
                 }
                 present_and_pulse_vblank(&mut sdl, &mut bus);
@@ -145,6 +209,41 @@ fn main() -> anyhow::Result<()> {
     println!("SP = 0x{:08X}", cpu.registers.get_sp());
 
     Ok(())
+}
+
+// Copia los bytes de un segmento PT_LOAD a donde corresponda (RAM o ROM
+// según en qué rango físico caiga). Fuera de esos dos rangos no hay dónde
+// ponerlo: para este emulador bare-metal, esos son los únicos dos bancos.
+fn blit_segment(ram: &mut [u8], rom: &mut [u8], paddr: u32, data: &[u8]) -> anyhow::Result<()> {
+    let end = paddr as u64 + data.len() as u64;
+    if paddr >= RAM_BASE && end <= RAM_BASE as u64 + ram.len() as u64 {
+        let off = (paddr - RAM_BASE) as usize;
+        ram[off..off + data.len()].copy_from_slice(data);
+        Ok(())
+    } else if paddr >= ROM_BASE && end <= ROM_BASE as u64 + rom.len() as u64 {
+        let off = (paddr - ROM_BASE) as usize;
+        rom[off..off + data.len()].copy_from_slice(data);
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("no entra ni en RAM ni en ROM"))
+    }
+}
+
+// Junta los eventos de SDL: le pasa las teclas al KeyboardMmio y refleja su
+// IRQ en Cause.IP2 (nivel, no flanco). Devuelve true si hay que salir.
+fn poll_input(sdl: &mut SdlDisplay, bus: &mut MemoryBus, cpu: &mut CPU) -> bool {
+    let pump = sdl.pump_events();
+    if let Some(kbd) = bus.device_mut::<KeyboardMmio>() {
+        for ev in pump.key_events {
+            kbd.push_event(ev);
+        }
+        if kbd.has_pending_irq() {
+            cpu.cop0.set_cause_bit(CAUSE_IP2);
+        } else {
+            cpu.cop0.clear_cause_bit(CAUSE_IP2);
+        }
+    }
+    pump.quit
 }
 
 // Presenta el frame actual y le pulsa VBLANK a la GPU (STATUS bit1), para

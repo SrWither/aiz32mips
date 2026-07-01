@@ -25,6 +25,7 @@ pub const CP0_REG_ENTRYHI: usize = 10;
 // bits 8-15, alineados 1 a 1 (IP0..IP7 con IM0..IM7).
 pub const CAUSE_IP_MASK: u32 = 0xFF00;
 pub const CAUSE_IP_SW_MASK: u32 = 0x0300; // IP0/IP1: únicos bits de Cause escribibles por software (MTC0)
+pub const CAUSE_IP2: u32 = 1 << 10; // interrupción de hardware: teclado
 pub const CAUSE_IP7: u32 = 1 << 15; // interrupción de timer (Count == Compare)
 
 // CP0 register numbers usados por el pipeline de excepciones/interrupciones

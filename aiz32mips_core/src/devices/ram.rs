@@ -14,6 +14,12 @@ impl Ram {
         }
     }
 
+    /// Como `new`, pero arrancando con contenido ya cargado (p.ej. los
+    /// segmentos de un ELF), en vez de todo en cero.
+    pub fn from_data(base: u32, data: Vec<u8>) -> Self {
+        Self { base, data }
+    }
+
     #[inline]
     fn offset(&self, paddr: u32) -> Option<usize> {
         let off = paddr.wrapping_sub(self.base) as usize;

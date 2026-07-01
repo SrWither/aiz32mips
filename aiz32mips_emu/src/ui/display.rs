@@ -4,8 +4,69 @@ use sdl2::video::WindowContext;
 use sdl2::{Sdl, pixels::PixelFormatEnum, rect::Rect, video::Window};
 
 use crate::mmio_offsets::*;
+use aiz32mips_core::devices::keyboard as kbd;
 use aiz32mips_core::devices::vram::SharedVram;
 use aiz32mips_core::memory::MemoryBus;
+
+pub struct PumpResult {
+    pub quit: bool,
+    /// Words ya en el formato que espera KeyboardMmio::push_event.
+    pub key_events: Vec<u32>,
+}
+
+fn translate_keycode(kc: sdl2::keyboard::Keycode) -> u8 {
+    use sdl2::keyboard::Keycode;
+    match kc {
+        Keycode::Up => kbd::KC_UP,
+        Keycode::Down => kbd::KC_DOWN,
+        Keycode::Left => kbd::KC_LEFT,
+        Keycode::Right => kbd::KC_RIGHT,
+        Keycode::Home => kbd::KC_HOME,
+        Keycode::End => kbd::KC_END,
+        Keycode::PageUp => kbd::KC_PAGEUP,
+        Keycode::PageDown => kbd::KC_PAGEDOWN,
+        Keycode::Insert => kbd::KC_INSERT,
+        Keycode::Delete => kbd::KC_DELETE,
+        Keycode::F1 => kbd::KC_F1,
+        Keycode::F2 => kbd::KC_F1 + 1,
+        Keycode::F3 => kbd::KC_F1 + 2,
+        Keycode::F4 => kbd::KC_F1 + 3,
+        Keycode::F5 => kbd::KC_F1 + 4,
+        Keycode::F6 => kbd::KC_F1 + 5,
+        Keycode::F7 => kbd::KC_F1 + 6,
+        Keycode::F8 => kbd::KC_F1 + 7,
+        Keycode::F9 => kbd::KC_F1 + 8,
+        Keycode::F10 => kbd::KC_F1 + 9,
+        Keycode::F11 => kbd::KC_F1 + 10,
+        Keycode::F12 => kbd::KC_F1 + 11,
+        other => {
+            // Para teclas imprimibles, el Keycode de SDL YA es su código
+            // ASCII sin shift (p.ej. Keycode::A == 'a' == 0x61): lo usamos
+            // directo como keycode "crudo". Todo lo que no entre en ASCII
+            // y no esté mapeado arriba queda en 0 (desconocido).
+            let raw = i32::from(other);
+            if (0..128).contains(&raw) { raw as u8 } else { 0 }
+        }
+    }
+}
+
+fn translate_mods(km: sdl2::keyboard::Mod) -> u32 {
+    use sdl2::keyboard::Mod;
+    let mut m = 0u32;
+    if km.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD) {
+        m |= kbd::MOD_SHIFT;
+    }
+    if km.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) {
+        m |= kbd::MOD_CTRL;
+    }
+    if km.intersects(Mod::LALTMOD | Mod::RALTMOD) {
+        m |= kbd::MOD_ALT;
+    }
+    if km.intersects(Mod::LGUIMOD | Mod::RGUIMOD) {
+        m |= kbd::MOD_GUI;
+    }
+    m
+}
 
 pub struct SdlDisplay {
     #[allow(dead_code)]
@@ -50,6 +111,7 @@ impl SdlDisplay {
         let event_pump = sdl
             .event_pump()
             .map_err(|e| anyhow::anyhow!("SDL event pump error: {}", e))?;
+        video.text_input().start(); // sin esto no llegan Event::TextInput
 
         Ok(Self {
             sdl,
@@ -95,15 +157,39 @@ impl SdlDisplay {
         Ok(())
     }
 
-    pub fn pump_events_quit(&mut self) -> bool {
+    pub fn pump_events(&mut self) -> PumpResult {
+        use sdl2::event::Event;
+        let mut quit = false;
+        let mut key_events = Vec::new();
         for e in self.event_pump.poll_iter() {
-            use sdl2::event::Event;
             match e {
-                Event::Quit { .. } => return true,
+                Event::Quit { .. } => quit = true,
+                Event::KeyDown {
+                    keycode: Some(kc),
+                    keymod,
+                    repeat: false,
+                    ..
+                } => {
+                    let word = translate_keycode(kc) as u32 | kbd::EVT_PRESSED | translate_mods(keymod);
+                    key_events.push(word);
+                }
+                Event::KeyUp {
+                    keycode: Some(kc),
+                    keymod,
+                    ..
+                } => {
+                    let word = translate_keycode(kc) as u32 | translate_mods(keymod);
+                    key_events.push(word);
+                }
+                Event::TextInput { text, .. } => {
+                    if let Some(&b) = text.as_bytes().first() {
+                        key_events.push(kbd::EVT_KIND_TEXT | b as u32);
+                    }
+                }
                 _ => {}
             }
         }
-        false
+        PumpResult { quit, key_events }
     }
 
     pub fn present_from_bus(&mut self, bus: &mut MemoryBus) -> anyhow::Result<()> {

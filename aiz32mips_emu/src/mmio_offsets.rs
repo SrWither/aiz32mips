@@ -28,3 +28,11 @@ pub const REG_TEXT_COLS: u32 = GPU_MMIO_BASE + 0x34; // u16
 pub const REG_TEXT_ROWS: u32 = GPU_MMIO_BASE + 0x36; // u16
 pub const REG_TEXT_PALETTE_ADDR: u32 = GPU_MMIO_BASE + 0x38; // u32
 pub const REG_TEXT_ENABLE: u32 = GPU_MMIO_BASE + 0x3C; // u8
+
+// ───────────────────────────── Teclado ─────────────────────────────────
+pub const KBD_MMIO_PHYS: u32 = 0x1F80_1000;
+pub const KBD_MMIO_BASE: u32 = 0xA000_0000 + KBD_MMIO_PHYS; // 0xBF80_1000, kseg1
+
+pub const REG_KBD_DATA: u32 = KBD_MMIO_BASE + 0x00; // u32, leer hace pop del FIFO (0 si está vacío)
+pub const REG_KBD_STATUS: u32 = KBD_MMIO_BASE + 0x04; // u32, bit0 = hay datos
+pub const REG_KBD_CTRL: u32 = KBD_MMIO_BASE + 0x08; // u8, bit0 = IRQ (Cause.IP2) habilitada
