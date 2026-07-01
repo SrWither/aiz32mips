@@ -1,7 +1,9 @@
 pub mod alu;
 pub mod cop;
 pub mod cpu;
+pub mod exception;
 pub mod instructions;
 pub mod memory;
 pub mod registers;
+pub mod tlb;
 pub mod devices;

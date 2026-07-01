@@ -1,38 +1,46 @@
-// gpu_test.c
-#define GPU_MMIO_BASE  0x1F802000
+// gpu.c — el CPU escribe directo sobre el framebuffer (sin pasar por la
+// GPU) para hacer un efecto de plasma. La VRAM es memoria normal mapeada
+// en el bus: cualquier SW a VRAM_BASE+offset pinta un píxel, convive sin
+// problema con los comandos de la GPU (que sólo tocan VRAM cuando vos le
+// mandás un comando).
+#include "gpu.h"
 
-#define REG_WIDTH      (*(volatile unsigned short*)(GPU_MMIO_BASE + 0x00))
-#define REG_HEIGHT     (*(volatile unsigned short*)(GPU_MMIO_BASE + 0x02))
-#define REG_PITCH      (*(volatile unsigned short*)(GPU_MMIO_BASE + 0x04))
-#define REG_BPP        (*(volatile unsigned char *)(GPU_MMIO_BASE + 0x06))
-#define REG_FBADDR     (*(volatile unsigned int  *)(GPU_MMIO_BASE + 0x08))
-#define REG_STATUS     (*(volatile unsigned int  *)(GPU_MMIO_BASE + 0x0C))
+#define W 320
+#define H 200
 
-#define VRAM_BASE      0x10000000
-#define FRAMEBUFFER    ((volatile unsigned int*)(VRAM_BASE))
+static inline u8 wave(u8 a) {
+    return (u8)((fx_sin_table[a] * 127) / 1024 + 128);
+}
 
 void _start() {
-    // Configuración inicial de la GPU
-    REG_WIDTH  = 320;
-    REG_HEIGHT = 200;
-    REG_PITCH  = 320;
-    REG_BPP    = 32;
-    REG_FBADDR = 0;
+    gpu_init(W, H, 1, 0); // double buffer para no pintar sobre lo que se está mostrando
 
-    // Pintar gradiente horizontal (de azul a rojo)
-    int width  = REG_WIDTH;
-    int height = REG_HEIGHT;
+    volatile u32 *fb;
+    u8 t = 0;
 
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            unsigned char r = (x * 255) / width;
-            unsigned char g = (y * 255) / height;
-            unsigned char b = 128;
-            unsigned int color = (r << 16) | (g << 8) | b;
-            FRAMEBUFFER[y * width + x] = color;
+    while (1) {
+        // dibujamos siempre sobre el back buffer (el que NO se está
+        // mostrando ahora mismo, según STATUS.DRAW_FB)
+        u32 draw_fb_addr = (REG_STATUS & STATUS_DRAW_FB) ? VRAM_FB1 : VRAM_FB0;
+        fb = (volatile u32 *)(VRAM_BASE + draw_fb_addr);
+
+        for (int y = 0; y < H; y++) {
+            for (int x = 0; x < W; x++) {
+                u8 idx = (u8)(x + y + t);
+                u8 idx2 = (u8)(x * 2 - y + t * 3);
+                u8 r = wave(idx);
+                u8 g = wave((u8)(idx2 + 85));
+                u8 b = wave((u8)(idx + idx2 + 170));
+                fb[y * W + x] = RGB(r, g, b);
+            }
         }
-    }
 
-    // Loop infinito para mantener la pantalla
-    while (1) {}
+        // un solo comando (FLIP) para mostrar lo que acabamos de pintar a mano
+        gpu_begin();
+        gpu_flip();
+        gpu_end();
+
+        gpu_wait_vblank();
+        t += 2;
+    }
 }

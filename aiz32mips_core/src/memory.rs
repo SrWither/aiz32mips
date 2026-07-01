@@ -43,19 +43,12 @@ pub trait Device: Any {
         self.write8(paddr + 3, ((value >> 24) & 0xFF) as u8)
     }
 
-    fn as_any(&self) -> &dyn Any
-    where
-        Self: Sized,
-    {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any
-    where
-        Self: Sized,
-    {
-        self
-    }
+    // Sin cuerpo default ni `where Self: Sized`: tienen que poder llamarse
+    // a través de `dyn Device` (p.ej. para bajar de tipo un device puntual
+    // desde el bus, como hace `MemoryBus::device_mut`). Cada impl concreto
+    // los provee con el `{ self }` de siempre.
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 pub struct MemoryBus {
@@ -75,6 +68,14 @@ impl MemoryBus {
         self.devices.push(dev);
     }
 
+    /// Busca el primer device registrado de tipo concreto `T` (p.ej. para
+    /// que el host pulse VBLANK en la GPU después de presentar un frame).
+    pub fn device_mut<T: Device>(&mut self) -> Option<&mut T> {
+        self.devices
+            .iter_mut()
+            .find_map(|d| d.as_any_mut().downcast_mut::<T>())
+    }
+
     fn find_device_mut(&mut self, paddr: u32) -> Option<&mut dyn Device> {
         self.devices
             .iter_mut()
@@ -91,18 +92,17 @@ impl MemoryBus {
     }
 
     pub fn read16(&mut self, paddr: u32) -> MemResult<u16> {
-        let b = [self.read8(paddr)?, self.read8(paddr + 1)?];
-        Ok(u16::from_le_bytes(b))
+        match self.find_device_mut(paddr) {
+            Some(dev) => dev.read16(paddr),
+            None => Err(MemoryError::Unmapped(paddr)),
+        }
     }
 
     pub fn read32(&mut self, paddr: u32) -> MemResult<u32> {
-        let b = [
-            self.read8(paddr)?,
-            self.read8(paddr + 1)?,
-            self.read8(paddr + 2)?,
-            self.read8(paddr + 3)?,
-        ];
-        Ok(u32::from_le_bytes(b))
+        match self.find_device_mut(paddr) {
+            Some(dev) => dev.read32(paddr),
+            None => Err(MemoryError::Unmapped(paddr)),
+        }
     }
 
     pub fn write8(&mut self, paddr: u32, value: u8) -> MemResult<()> {
@@ -114,17 +114,17 @@ impl MemoryBus {
     }
 
     pub fn write16(&mut self, paddr: u32, value: u16) -> MemResult<()> {
-        let bytes = value.to_le_bytes();
-        self.write8(paddr, bytes[0])?;
-        self.write8(paddr + 1, bytes[1])
+        match self.find_device_mut(paddr) {
+            Some(dev) => dev.write16(paddr, value),
+            None => Err(MemoryError::Unmapped(paddr)),
+        }
     }
 
     pub fn write32(&mut self, paddr: u32, value: u32) -> MemResult<()> {
-        let bytes = value.to_le_bytes();
-        for (i, b) in bytes.iter().enumerate() {
-            self.write8(paddr + i as u32, *b)?;
+        match self.find_device_mut(paddr) {
+            Some(dev) => dev.write32(paddr, value),
+            None => Err(MemoryError::Unmapped(paddr)),
         }
-        Ok(())
     }
 
     pub fn translate_vaddr(&self, vaddr: u32) -> MemResult<u32> {
@@ -142,11 +142,17 @@ impl MemoryBus {
     }
 
     pub fn read16_virt(&mut self, vaddr: u32) -> MemResult<u16> {
+        if vaddr % 2 != 0 {
+            return Err(MemoryError::AddressErrorLoad(vaddr));
+        }
         let paddr = self.translate_vaddr(vaddr)?;
         self.read16(paddr)
     }
 
     pub fn read32_virt(&mut self, vaddr: u32) -> MemResult<u32> {
+        if vaddr % 4 != 0 {
+            return Err(MemoryError::AddressErrorLoad(vaddr));
+        }
         let paddr = self.translate_vaddr(vaddr)?;
         self.read32(paddr)
     }
@@ -157,11 +163,17 @@ impl MemoryBus {
     }
 
     pub fn write16_virt(&mut self, vaddr: u32, val: u16) -> MemResult<()> {
+        if vaddr % 2 != 0 {
+            return Err(MemoryError::AddressErrorStore(vaddr));
+        }
         let paddr = self.translate_vaddr(vaddr)?;
         self.write16(paddr, val)
     }
 
     pub fn write32_virt(&mut self, vaddr: u32, val: u32) -> MemResult<()> {
+        if vaddr % 4 != 0 {
+            return Err(MemoryError::AddressErrorStore(vaddr));
+        }
         let paddr = self.translate_vaddr(vaddr)?;
         self.write32(paddr, val)
     }

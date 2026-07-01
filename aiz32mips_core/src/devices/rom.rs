@@ -16,6 +16,12 @@ impl Rom {
         let off = paddr.wrapping_sub(self.base) as usize;
         if off < self.data.len() { Some(off) } else { None }
     }
+
+    #[inline]
+    fn offset_span(&self, paddr: u32, len: usize) -> Option<usize> {
+        let off = paddr.wrapping_sub(self.base) as usize;
+        if off.checked_add(len)? <= self.data.len() { Some(off) } else { None }
+    }
 }
 
 impl Device for Rom {
@@ -34,5 +40,22 @@ impl Device for Rom {
 
     fn write8(&mut self, paddr: u32, _value: u8) -> MemResult<()> {
         Err(MemoryError::RomWrite(paddr))
+    }
+
+    fn read16(&mut self, paddr: u32) -> MemResult<u16> {
+        let off = self.offset_span(paddr, 2).ok_or(MemoryError::Unmapped(paddr))?;
+        Ok(u16::from_le_bytes(self.data[off..off + 2].try_into().unwrap()))
+    }
+
+    fn read32(&mut self, paddr: u32) -> MemResult<u32> {
+        let off = self.offset_span(paddr, 4).ok_or(MemoryError::Unmapped(paddr))?;
+        Ok(u32::from_le_bytes(self.data[off..off + 4].try_into().unwrap()))
+    }
+
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
     }
 }

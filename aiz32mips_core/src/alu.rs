@@ -20,7 +20,7 @@ pub enum AluOp {
     Mthi,
     Mtlo,
     Lui,
-    Teq,
+    Movz,
     None,
 }
 
@@ -51,7 +51,7 @@ impl ALU {
         hi: u32,
         lo: u32,
     ) -> AluResult {
-        let overflow = false;
+        let mut overflow = false;
         let mut result = 0;
         let mut hi_res = None;
         let mut lo_res = None;
@@ -60,12 +60,15 @@ impl ALU {
         // === I-TYPE ===
         if inmediate {
             let imm_se = imm as i16 as i32 as u32;
-            
+
             match opcode {
                 0x08 => {
-                    // ADDI
-                    result = rs_val.wrapping_add(imm_se);
+                    // ADDI (trapea en overflow con signo)
                     op = AluOp::Add;
+                    match (rs_val as i32).checked_add(imm_se as i32) {
+                        Some(v) => result = v as u32,
+                        None => overflow = true,
+                    }
                 }
                 0x09 => {
                     // ADDIU
@@ -113,16 +116,24 @@ impl ALU {
             match funct {
                 // ---- Aritméticas ----
                 0x20 => {
-                    result = rs_val.wrapping_add(rt_val);
+                    // ADD (trapea en overflow con signo)
                     op = AluOp::Add;
+                    match (rs_val as i32).checked_add(rt_val as i32) {
+                        Some(v) => result = v as u32,
+                        None => overflow = true,
+                    }
                 } // ADD
                 0x21 => {
                     result = rs_val.wrapping_add(rt_val);
                     op = AluOp::Add;
                 } // ADDU
                 0x22 => {
-                    result = rs_val.wrapping_sub(rt_val);
+                    // SUB (trapea en overflow con signo)
                     op = AluOp::Sub;
+                    match (rs_val as i32).checked_sub(rt_val as i32) {
+                        Some(v) => result = v as u32,
+                        None => overflow = true,
+                    }
                 } // SUB
                 0x23 => {
                     result = rs_val.wrapping_sub(rt_val);
@@ -157,13 +168,6 @@ impl ALU {
                 0x2B => {
                     result = if rs_val < rt_val { 1 } else { 0 };
                     op = AluOp::Sltu;
-                }
-                0x34 => {
-                    // TEQ
-                    if rs_val == rt_val {
-                        result = 1;
-                    }
-                    op = AluOp::Teq;
                 }
                 // ---- Desplazamientos ----
                 0x00 => {
@@ -237,10 +241,7 @@ impl ALU {
                     lo_res = Some(rs_val);
                     op = AluOp::Mtlo;
                 }
-                0x08 |
-                0x09 |
-                0x0C |
-                0x0D => {}
+                0x08 | 0x09 | 0x0C | 0x0D => {}
                 _ => println!("[ALU] Unhandled R-type funct 0x{:02X}", funct),
             }
         }

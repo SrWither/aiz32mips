@@ -1,10 +1,30 @@
-pub const GPU_MMIO_BASE: u32 = 0x1F80_2000;
+// Algunos quedan sin uso del lado Rust (los pokean directo los ejemplos en
+// C), pero los dejamos acá para que el mapa de registros tenga una sola
+// fuente de verdad documentada en el lado del host.
+#![allow(dead_code)]
 
-pub const REG_WIDTH: u32 = GPU_MMIO_BASE + 0x00; // u16
-pub const REG_HEIGHT: u32 = GPU_MMIO_BASE + 0x02; // u16
-pub const REG_PITCH: u32 = GPU_MMIO_BASE + 0x04; // u16 (en píxeles cuando bpp=32)
-pub const REG_BPP: u32 = GPU_MMIO_BASE + 0x06; // u8  (soportamos 32 por ahora)
-pub const REG_FBADDR: u32 = GPU_MMIO_BASE + 0x08; // u32 (offset dentro de VRAM)
-pub const REG_STATUS: u32 = GPU_MMIO_BASE + 0x0C; // u32 (bit0=BUSY)
-pub const REG_CMD: u32 = GPU_MMIO_BASE + 0x10; // u32 (escribir comando aquí)
-pub const REG_FONTADDR: u32 = GPU_MMIO_BASE + 0x20; // u32 (offset dentro de VRAM)
+// Dirección física real del device en el bus (usada al registrarlo).
+pub const GPU_MMIO_PHYS: u32 = 0x1F80_2000;
+// Vista por el CPU en kseg1 (uncached, sin TLB) — todo este código bare
+// metal corre antes de que exista ninguna entrada de TLB, así que tiene
+// que vivir en un segmento sin traducción, igual que el propio vector de
+// reset (0xBFC0_0000). kuseg exigiría TLB y rompería en el primer acceso.
+pub const GPU_MMIO_BASE: u32 = 0xA000_0000 + GPU_MMIO_PHYS; // 0xBF80_2000
+
+pub const REG_FB_WIDTH: u32 = GPU_MMIO_BASE + 0x00; // u16
+pub const REG_FB_HEIGHT: u32 = GPU_MMIO_BASE + 0x02; // u16
+pub const REG_FB0_ADDR: u32 = GPU_MMIO_BASE + 0x08; // u32, offset en VRAM
+pub const REG_FB1_ADDR: u32 = GPU_MMIO_BASE + 0x0C; // u32, offset en VRAM (0 = sin double buffer)
+pub const REG_ZBUF_ADDR: u32 = GPU_MMIO_BASE + 0x10; // u32, offset en VRAM (0 = sin Z-buffer)
+pub const REG_STATUS: u32 = GPU_MMIO_BASE + 0x14; // u32: bit1=VBLANK bit2=DRAW_FB bit3=DISPLAY_FB
+pub const REG_CMD_ADDR: u32 = GPU_MMIO_BASE + 0x18; // u32, offset en VRAM de la display list
+pub const REG_CMD_LEN: u32 = GPU_MMIO_BASE + 0x1C; // u32, cantidad de words u32
+pub const REG_CMD_KICK: u32 = GPU_MMIO_BASE + 0x20; // u8, cualquier escritura ejecuta
+pub const REG_FONTADDR: u32 = GPU_MMIO_BASE + 0x24; // u32, offset en VRAM
+pub const REG_FONTW: u32 = GPU_MMIO_BASE + 0x28; // u8
+pub const REG_FONTH: u32 = GPU_MMIO_BASE + 0x29; // u8
+pub const REG_TEXT_ADDR: u32 = GPU_MMIO_BASE + 0x30; // u32, offset en VRAM
+pub const REG_TEXT_COLS: u32 = GPU_MMIO_BASE + 0x34; // u16
+pub const REG_TEXT_ROWS: u32 = GPU_MMIO_BASE + 0x36; // u16
+pub const REG_TEXT_PALETTE_ADDR: u32 = GPU_MMIO_BASE + 0x38; // u32
+pub const REG_TEXT_ENABLE: u32 = GPU_MMIO_BASE + 0x3C; // u8

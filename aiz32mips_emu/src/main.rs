@@ -6,8 +6,8 @@ use std::fs;
 use std::process;
 
 use aiz32mips_core::cpu::CPU;
-use aiz32mips_core::devices::gpu::GpuMmio;
-use aiz32mips_core::devices::vram::GpuVram;
+use aiz32mips_core::devices::gpu::{self, GpuMmio};
+use aiz32mips_core::devices::vram::{new_shared_vram, GpuVram};
 use aiz32mips_core::devices::{ram::Ram, rom::Rom};
 use aiz32mips_core::memory::MemoryBus;
 
@@ -40,34 +40,43 @@ fn main() -> anyhow::Result<()> {
     bus.add_device(Box::new(Ram::new(0x0000_0000, 0x0020_0000))); // 2MB
     bus.add_device(Box::new(Rom::new(0x1FC0_0000, rom_data))); // BIOS
 
-    // === GPU ===
+    // === GPU + VRAM ===
+    // VRAM compartida entre el device de bus (para que el CPU le pueda
+    // escribir directamente con loads/stores normales, p.ej. para efectos)
+    // y la GPU (que la usa para ejecutar comandos). Antes esto se resolvía
+    // con un puntero crudo a un struct que además se movía de lugar (UB);
+    // ahora ambos lados comparten la misma asignación vía Rc<RefCell<>>.
     let vram_base = 0x1000_0000;
     let vram_size = 4 * 1024 * 1024; // 4MB
-    let fb_off = 0; // FB al inicio
-    let mut vram = GpuVram::new(vram_base, vram_size);
-    let gpu = GpuMmio::new(GPU_MMIO_BASE, &mut vram);
+    let vram_buf = new_shared_vram(vram_size);
+    let vram_dev = GpuVram::new(vram_base, vram_buf.clone());
+    let gpu = GpuMmio::new(GPU_MMIO_PHYS, vram_buf.clone()); // registrado en su dirección física;
+    // el CPU la ve reflejada en kseg1 vía GPU_MMIO_BASE (ver mmio_offsets.rs)
 
-    // font ROM
-    let font_addr = 0x0020_0000;
-    vram.slice_mut()[font_addr..font_addr + font_rom_data.len()].copy_from_slice(&font_rom_data);
+    // font ROM, en el layout default que también usa la lib en C
+    let font_addr = gpu::VRAM_FONT as usize;
+    vram_buf.borrow_mut().data[font_addr..font_addr + font_rom_data.len()]
+        .copy_from_slice(&font_rom_data);
 
     // registrar en bus
-    bus.add_device(Box::new(vram));
+    bus.add_device(Box::new(vram_dev));
     bus.add_device(Box::new(gpu));
 
-    // Config inicial simple: 320x200x32
-    write16(&mut bus, REG_WIDTH, 320);
-    write16(&mut bus, REG_HEIGHT, 200);
-    write16(&mut bus, REG_PITCH, 320);
-    write8(&mut bus, REG_BPP, 32);
-    write32(&mut bus, REG_FBADDR, fb_off);
-    write32(&mut bus, REG_FONTADDR, font_addr as u32);
+    // Config inicial: 320x200, framebuffer único (sin double buffer todavía)
+    write16(&mut bus, REG_FB_WIDTH, 320);
+    write16(&mut bus, REG_FB_HEIGHT, 200);
+    write32(&mut bus, REG_FB0_ADDR, gpu::VRAM_FB0);
+    write32(&mut bus, REG_FONTADDR, gpu::VRAM_FONT);
+    write8(&mut bus, REG_FONTW, 8);
+    write8(&mut bus, REG_FONTH, 8);
 
     // === cpu ===
     let mut cpu = CPU::new();
 
     // === sdl ===
-    let mut sdl = SdlDisplay::new(3)?; // escala x3
+    // present_from_bus ya no recorre la VRAM byte a byte por el bus (256k
+    // accesos individuales por frame); copia directo del buffer compartido.
+    let mut sdl = SdlDisplay::new(3, vram_buf)?; // escala x3
 
     // === ciclos ===
     let infinite = cycles_arg == "inf";
@@ -90,32 +99,38 @@ fn main() -> anyhow::Result<()> {
     let mut steps_since_present = 0u32;
     let present_every = 10_000; // ajustá esto según rendimiento
 
+    // El polling de eventos (pump_events_quit) y el present van juntos,
+    // una vez cada `present_every` instrucciones — antes se llamaba
+    // pump_events_quit() en CADA instrucción de CPU, creando un EventPump
+    // nuevo y haciendo un poll de SDL/X11 millones de veces por segundo.
+    // Eso, no el intérprete, era el cuello de botella real del "1 fps"
+    // (el intérprete solo ya anda a varios millones de instrucciones/seg).
     if infinite {
         loop {
-            if sdl.pump_events_quit() {
-                break;
-            }
             cpu.step(&mut bus);
             steps_since_present += 1;
             if steps_since_present >= present_every {
                 steps_since_present = 0;
-                let _ = sdl.present_from_bus(&mut bus); // ignoramos error vram no configurado
+                if sdl.pump_events_quit() {
+                    break;
+                }
+                present_and_pulse_vblank(&mut sdl, &mut bus);
             }
         }
     } else {
         for _ in 0..cycles {
-            if sdl.pump_events_quit() {
-                break;
-            }
             cpu.step(&mut bus);
             steps_since_present += 1;
             if steps_since_present >= present_every {
                 steps_since_present = 0;
-                let _ = sdl.present_from_bus(&mut bus);
+                if sdl.pump_events_quit() {
+                    break;
+                }
+                present_and_pulse_vblank(&mut sdl, &mut bus);
             }
         }
         // presenta al final
-        let _ = sdl.present_from_bus(&mut bus);
+        present_and_pulse_vblank(&mut sdl, &mut bus);
     }
 
     // dump
@@ -130,6 +145,15 @@ fn main() -> anyhow::Result<()> {
     println!("SP = 0x{:08X}", cpu.registers.get_sp());
 
     Ok(())
+}
+
+// Presenta el frame actual y le pulsa VBLANK a la GPU (STATUS bit1), para
+// que el software pueda hacer `gpu_wait_vblank()` sin tearing.
+fn present_and_pulse_vblank(sdl: &mut SdlDisplay, bus: &mut MemoryBus) {
+    let _ = sdl.present_from_bus(bus);
+    if let Some(gpu) = bus.device_mut::<GpuMmio>() {
+        gpu.pulse_vblank();
+    }
 }
 
 // helpers MMIO
