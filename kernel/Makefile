@@ -46,6 +46,7 @@ disk.img: FORCE diskroot/home/readme.txt
 	mkfs.vfat -F 32 disk.img >/dev/null
 	mmd -i disk.img ::/bin ::/lib ::/include ::/home
 	mcopy -i disk.img ../user/hello.elf ::/bin/hello.elf
+	mcopy -i disk.img ../user/ping.elf ::/bin/ping.elf
 	mcopy -i disk.img ../user/pingpong.elf ::/bin/pingpong.elf
 	mcopy -i disk.img ../user/cube3d.elf ::/bin/cube3d.elf
 	mcopy -i disk.img diskroot/home/readme.txt ::/home/readme.txt

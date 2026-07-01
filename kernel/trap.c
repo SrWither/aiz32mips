@@ -63,6 +63,12 @@ static void handle_syscall(TrapFrame *tf) {
         case SYS_SEM_SIGNAL:
             sem_signal((int)tf->a0);
             break;
+        case SYS_FORK:
+            // El hijo ya queda armado con su propio v0=0 dentro de
+            // sched_fork; acá sólo se pisa el del padre (este mismo tf)
+            // con el pid del hijo, o -1 si no había slot.
+            tf->v0 = (u32)sched_fork(tf);
+            break;
         case SYS_GPU_INIT:
             // A partir de acá el proceso es dueño de la pantalla (ver
             // gfx_owner_pid arriba): apaga el texto, que a partir de ahora

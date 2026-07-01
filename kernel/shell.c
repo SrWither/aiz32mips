@@ -214,18 +214,28 @@ static int resolve_exec(char *out, u32 outmax, const char *cmd) {
     return -1;
 }
 
-static void cmd_ping(void) {
-    console_puts("pong\n");
+// Entero decimal simple (sin signo) para usar como arg0 al spawnear — así
+// "pingpong 1" corre con rol 1 en vez del 0 por defecto (ver user/pingpong.c:
+// ya no hay builtin que lo lance con los dos roles a la vez, son dos
+// comandos sueltos). Sin dígitos válidos: 0.
+static u32 parse_arg0(const char *s) {
+    u32 v = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (u32)(*s - '0');
+        s++;
+    }
+    return v;
 }
 
-// run <cmd>: mismo resolutor que un comando suelto (path con '/' o
+// run <cmd> [arg0]: mismo resolutor que un comando suelto (path con '/' o
 // búsqueda en $PATH) — no bloquea: sched_spawn solo registra el proceso,
 // el scheduler lo hace correr desde el próximo tick del timer.
 static void cmd_run(char *rest) {
     if (rest[0] == 0) {
-        console_puts("uso: run <comando>\n");
+        console_puts("uso: run <comando> [arg0]\n");
         return;
     }
+    char *arg = split_first_space(rest);
     char path[PATH_MAX];
     if (resolve_exec(path, sizeof(path), rest) < 0) {
         console_puts("no encontrado: ");
@@ -233,21 +243,10 @@ static void cmd_run(char *rest) {
         console_putc('\n');
         return;
     }
-    if (sched_spawn(path, 0) < 0) {
+    if (sched_spawn(path, parse_arg0(arg)) < 0) {
         console_puts("no se pudo ejecutar: ");
         console_puts(path);
         console_putc('\n');
-    }
-}
-
-static void cmd_pingpong(void) {
-    // Semáforos en (0,0): arrancan "vacíos", el primer sys_sem_wait de
-    // cada rol bloquea hasta que el otro haga su sys_sem_signal (ver
-    // user/pingpong.c y kernel/sem.c).
-    sem_init(0, 0);
-    sem_init(1, 0);
-    if (sched_spawn("/bin/pingpong.elf", 0) < 0 || sched_spawn("/bin/pingpong.elf", 1) < 0) {
-        console_puts("no se pudo ejecutar /bin/pingpong.elf\n");
     }
 }
 
@@ -353,12 +352,8 @@ static void shell_dispatch(void) {
     char *rest = split_first_space(cmd_buf);
     if (cmd_buf[0] == 0) {
         // linea vacia: no hace nada
-    } else if (str_eq(cmd_buf, "ping")) {
-        cmd_ping();
     } else if (str_eq(cmd_buf, "run")) {
         cmd_run(rest);
-    } else if (str_eq(cmd_buf, "pingpong")) {
-        cmd_pingpong();
     } else if (str_eq(cmd_buf, "ls")) {
         char path[PATH_MAX];
         resolve_path(path, sizeof(path), rest);
@@ -383,7 +378,7 @@ static void shell_dispatch(void) {
         // "hello" corre igual que antes "run hello".
         char path[PATH_MAX];
         if (resolve_exec(path, sizeof(path), cmd_buf) == 0) {
-            if (sched_spawn(path, 0) < 0) {
+            if (sched_spawn(path, parse_arg0(rest)) < 0) {
                 console_puts("no se pudo ejecutar: ");
                 console_puts(path);
                 console_putc('\n');

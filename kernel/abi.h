@@ -19,6 +19,7 @@
 #define SYS_GPU_INIT 6
 #define SYS_GPU_SUBMIT 7
 #define SYS_GPU_STATUS 8
+#define SYS_FORK 9
 
 static inline void sys_putc(char c) {
     register unsigned int r4 __asm__("$4") = (unsigned int)(unsigned char)c;
@@ -82,6 +83,17 @@ static inline unsigned int sys_gpu_status(void) {
     register unsigned int r2 __asm__("$2") = SYS_GPU_STATUS;
     __asm__ volatile("syscall" : "+r"(r2) : : "memory");
     return r2;
+}
+
+// fork(): duplica al proceso actual entero (las 4 páginas físicas, ver
+// kernel/sched.c::sched_fork) en un slot nuevo. Devuelve el pid del hijo
+// en el padre, 0 en el hijo, -1 si no había slot libre — igual que el
+// fork() de toda la vida, aunque acá adentro es copia completa de página,
+// no copy-on-write.
+static inline int sys_fork(void) {
+    register unsigned int r2 __asm__("$2") = SYS_FORK;
+    __asm__ volatile("syscall" : "+r"(r2) : : "memory");
+    return (int)r2;
 }
 
 #endif // AIZ_ABI_H

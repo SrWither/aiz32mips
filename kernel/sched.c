@@ -17,6 +17,10 @@ typedef enum {
 typedef struct {
     TrapFrame ctx;
     proc_state_t state;
+    // Las 4 páginas físicas del proceso (ver mm_map_user): sched_spawn las
+    // calcula pero antes las tiraba después de mapearlas — sched_fork
+    // necesita poder leerlas de vuelta para saber qué copiarle al hijo.
+    u32 prog_phys, heap0_phys, heap1_phys, stack_phys;
 } Process;
 
 static Process proc_table[MAX_PROCS];
@@ -247,7 +251,7 @@ int sched_spawn(const char *path, u32 arg0) {
         }
         pmm_write_page_at(prog_phys, seg_off, elf_buf + segs[i].offset, segs[i].filesz);
     }
-    pmm_write_page(heap0_phys, 0, 0); // heap sin usar todavía: en 0 (ver user/malloc.h)
+    pmm_write_page(heap0_phys, 0, 0); // heap sin usar todavía: en 0 (ver user/libc/stdlib.h)
     pmm_write_page(heap1_phys, 0, 0);
     pmm_write_page(stack_phys, 0, 0);
     // A diferencia de sched_switch_to, esto SÍ puede escribir EntryHi
@@ -255,6 +259,10 @@ int sched_spawn(const char *path, u32 arg0) {
     // propio stack vive en kseg1 (no traducido), así que no hay ventana de
     // desenrolle afectada por el ASID que quede puesto.
     mm_map_user((u32)slot, prog_phys, heap0_phys, heap1_phys, stack_phys);
+    proc_table[slot].prog_phys = prog_phys;
+    proc_table[slot].heap0_phys = heap0_phys;
+    proc_table[slot].heap1_phys = heap1_phys;
+    proc_table[slot].stack_phys = stack_phys;
 
     TrapFrame *ctx = &proc_table[slot].ctx;
     u32 *words = (u32 *)ctx;
@@ -273,4 +281,49 @@ int sched_spawn(const char *path, u32 arg0) {
 
     proc_table[slot].state = PROC_READY;
     return slot;
+}
+
+// fork(): duplica al proceso actual (4 páginas físicas copiadas enteras,
+// sin copy-on-write — ver pmm_copy_page) en un slot nuevo, con el mismo
+// contexto de registros que tenía en el momento del syscall. El único
+// dato que difiere entre padre e hijo es v0 (valor de retorno de fork):
+// el padre lo pisa afuera, en trap.c, con el pid que devolvemos acá; al
+// hijo se lo dejamos en 0 directamente en su copia del contexto.
+int sched_fork(TrapFrame *tf) {
+    int slot = -1;
+    for (int i = 1; i < MAX_PROCS; i++) {
+        if (proc_table[i].state == PROC_UNUSED) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        return -1;
+    }
+
+    Process *parent = &proc_table[current_pid];
+    u32 prog_phys = pmm_alloc_page();
+    u32 heap0_phys = pmm_alloc_page();
+    u32 heap1_phys = pmm_alloc_page();
+    u32 stack_phys = pmm_alloc_page();
+    pmm_copy_page(prog_phys, parent->prog_phys);
+    pmm_copy_page(heap0_phys, parent->heap0_phys);
+    pmm_copy_page(heap1_phys, parent->heap1_phys);
+    pmm_copy_page(stack_phys, parent->stack_phys);
+    // Mismo comentario que en sched_spawn: fork siempre lo llama un
+    // proceso corriendo (nunca el shell "desde afuera"), pero el shell
+    // TAMPOCO usa TLB propio (kseg1), así que esto sigue siendo seguro.
+    mm_map_user((u32)slot, prog_phys, heap0_phys, heap1_phys, stack_phys);
+
+    Process *child = &proc_table[slot];
+    child->prog_phys = prog_phys;
+    child->heap0_phys = heap0_phys;
+    child->heap1_phys = heap1_phys;
+    child->stack_phys = stack_phys;
+    tf_copy(&child->ctx, tf); // mismos registros que el padre en este instante...
+    child->ctx.v0 = 0;        // ...salvo el retorno de fork(): 0 en el hijo
+    child->ctx.epc = tf->epc + 4; // no reejecutar el syscall (igual que el padre, ver trap.c)
+    child->state = PROC_READY;
+
+    return slot; // el padre recibe el pid del hijo (lo pisa trap.c en tf->v0)
 }

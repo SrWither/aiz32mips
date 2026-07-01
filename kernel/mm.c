@@ -35,6 +35,18 @@ void pmm_write_page_at(u32 phys, u32 offset, const u8 *data, u32 len) {
     }
 }
 
+// Copia una página física entera a otra: la usa sched_fork para duplicar
+// las 4 páginas del padre en las del hijo. Nada de copy-on-write todavía
+// (sería lo suyo con más TLB refill del que hay hoy, ver el comentario de
+// tlb.rs en aiz32mips_core) — fork acá es sinónimo de "copiar 16KB".
+void pmm_copy_page(u32 dst_phys, u32 src_phys) {
+    const u8 *src = (const u8 *)(0x80000000u + src_phys);
+    u8 *dst = (u8 *)(0x80000000u + dst_phys);
+    for (u32 i = 0; i < PAGE_SIZE; i++) {
+        dst[i] = src[i];
+    }
+}
+
 static void tlb_write_pair(u32 index, u32 vaddr_even, u32 phys_even, u32 phys_odd) {
     cop0_write_index(index);
     cop0_write_entryhi((vaddr_even & ~0x1FFFu) | (index % MAX_PROCS));

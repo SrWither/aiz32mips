@@ -118,7 +118,7 @@ void shell_input(char c);
 // sched.c::sched_spawn lo comparten: un solo lugar para no desincronizar
 // dónde arranca el programa, a qué vaddr apuntan los PT_LOAD del ELF, y
 // dónde cae el heap que ve malloc()/free() en userland — ver
-// user/malloc.h). Dos entradas de TLB por proceso (ver mm_map_user):
+// user/libc/stdlib.h). Dos entradas de TLB por proceso (ver mm_map_user):
 // VPN2 A = prog+heap0, VPN2 B = heap1+stack.
 #define USER_VADDR 0x00400000u       // texto+datos+bss (una página, la del ELF)
 #define USER_HEAP_VADDR 0x00401000u  // heap: 2 páginas (8KB) — ver user/malloc.h
@@ -136,6 +136,7 @@ void shell_input(char c);
 u32 pmm_alloc_page(void);
 void pmm_write_page(u32 phys, const u8 *data, u32 len);       // pisa la página entera (resto en 0)
 void pmm_write_page_at(u32 phys, u32 offset, const u8 *data, u32 len); // solo ese rango, no toca el resto
+void pmm_copy_page(u32 dst_phys, u32 src_phys);                        // la usa sched_fork
 void mm_map_user(u32 asid, u32 prog_phys, u32 heap0_phys, u32 heap1_phys, u32 stack_phys);
 
 // sched.c: scheduler round-robin. El proceso 0 es el propio kernel/shell.
@@ -149,6 +150,7 @@ void sched_tick(TrapFrame *tf);       // preemption: la llama timer_tick
 void sched_block_current(TrapFrame *tf); // duerme al actual (sem_wait)
 void sched_wake(int pid);                // lo despierta (sem_signal)
 int sched_spawn(const char *path, u32 arg0); // lee+parsea el ELF de disco; slot o -1
+int sched_fork(TrapFrame *tf); // duplica al proceso actual; pid del hijo (o -1) para el padre
 void sched_exit_current(TrapFrame *tf);      // usan SYS_EXIT y el kill por fallo
 void sched_kill_all_user(void);              // Ctrl+C: corta todo lo que no sea el shell
 
