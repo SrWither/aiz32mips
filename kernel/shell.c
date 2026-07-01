@@ -23,8 +23,11 @@ static void cmd_ping(void) {
 
 static void cmd_run(void) {
     u32 len = (u32)(_binary_hello_bin_end - _binary_hello_bin_start);
-    user_map_and_load(_binary_hello_bin_start, len);
-    enter_user_mode(0x00400000u, 0x00402000u);
+    // No bloquea: sched_spawn solo registra el proceso, el scheduler lo
+    // hace correr desde el próximo tick del timer (ver sched.c).
+    if (sched_spawn(_binary_hello_bin_start, len) < 0) {
+        console_puts("no hay slots de proceso libres\n");
+    }
 }
 
 static void shell_dispatch(void) {

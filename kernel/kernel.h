@@ -87,6 +87,9 @@ static inline void cop0_write_entrylo1(u32 v) {
 static inline void cop0_write_pagemask(u32 v) {
     __asm__ volatile("mtc0 %0, $5" : : "r"(v));
 }
+static inline void cop0_write_index(u32 v) {
+    __asm__ volatile("mtc0 %0, $0" : : "r"(v));
+}
 static inline void cop0_tlbwi(void) {
     __asm__ volatile("tlbwi");
 }
@@ -102,27 +105,27 @@ void console_flush(void); // recompone el texto sobre el FB (gpu_flip)
 // trap.c
 void kernel_trap(TrapFrame *tf);
 void keyboard_irq(void);
-void timer_tick(void);
+void timer_tick(TrapFrame *tf);
 
 // shell.c
 void shell_init(void);
 void shell_input(char c);
 
-// mm.c
+// mm.c: memoria física + mecánica de TLB, sin política de proceso (eso es
+// de sched.c).
 u32 pmm_alloc_page(void);
-void user_map_and_load(const u8 *img, u32 img_len);
+void pmm_write_page(u32 phys, const u8 *data, u32 len);
+void mm_map_user(u32 asid, u32 prog_phys, u32 stack_phys);
 
-// boot.S: nunca retorna directo. Antes de saltar a modo usuario guarda el
-// punto de retorno (ra/sp) y los registros "callee-saved" (s0-s7/gp/fp) de
-// quien llamó en g_kexit_*; el SYS_EXIT de trap.c reescribe el TrapFrame con
-// esos valores para "volver" de ahí como si hubiera sido un return normal.
-// Sin esto, lo que la app de usuario haya dejado en esos registros (p.ej.
-// $16 usado como puntero en su propio loop) quedaría pisando el contexto
-// del kernel al que se vuelve.
-extern u32 g_kexit_pc;
-extern u32 g_kexit_sp;
-extern u32 g_kexit_ctx[10]; // s0..s7, gp, fp
-void enter_user_mode(u32 entry, u32 usp);
+// sched.c: scheduler round-robin. El proceso 0 es el propio kernel/shell.
+// g_next_asid: el ASID del proceso elegido en el último switch; lo escribe
+// exception_entry (boot.S) en EntryHi justo antes del eret, no sched.c —
+// ver el comentario en sched.c para el por qué.
+extern u32 g_next_asid;
+void sched_init(void);
+void sched_tick(TrapFrame *tf);       // preemption: la llama timer_tick
+int sched_spawn(const u8 *img, u32 img_len); // devuelve slot o -1
+void sched_exit_current(TrapFrame *tf);      // usan SYS_EXIT y el kill por fallo
 
 // kernel.c
 void kernel_main(void);

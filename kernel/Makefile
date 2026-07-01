@@ -12,7 +12,7 @@ CFLAGS  = -target $(ARCH) -mips32 -ffreestanding -fno-pic -fno-builtin \
 ASFLAGS = -target $(ARCH) -mips32 -ffreestanding -fno-pic -G0 -nostdlib \
           -D__ASSEMBLER__ -I../aiz32mips_emu/data -c
 
-C_SRCS  = kernel.c console.c trap.c shell.c mm.c
+C_SRCS  = kernel.c console.c trap.c shell.c mm.c sched.c
 OBJS    = boot.o $(C_SRCS:.c=.o) hello_blob.o
 
 all: kernel.elf

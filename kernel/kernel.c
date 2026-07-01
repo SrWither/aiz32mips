@@ -62,6 +62,11 @@ void kernel_main(void) {
     console_puts("AIZ-32 mini kernel\n");
     console_puts("excepciones + timer (IP7) + teclado (IP2) por IRQ\n\n");
 
+    // proceso 0 = este mismo kernel/shell; se registra antes de habilitar
+    // interrupciones para que el primer tick del timer ya tenga a quién
+    // guardar el contexto.
+    sched_init();
+
     // arranca el timer: primer tick en TICK_PERIOD ciclos de Count
     cop0_write_compare(cop0_read_count() + TICK_PERIOD);
 

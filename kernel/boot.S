@@ -15,7 +15,6 @@
 
 .global _start
 .global exception_entry
-.global enter_user_mode
 
 #define TF_SIZE     152
 #define TF_AT       4
@@ -182,42 +181,17 @@ exception_entry:
     // el prólogo), pero así SYS_EXIT (trap.c) puede redirigir el $sp real
     // con solo pisar tf->sp, sin este load quedaría clobbereado sin efecto.
     lw    $29, TF_SP($sp)
-    eret
 
-// ───────────────────────────── modo usuario ─────────────────────────────
-// enter_user_mode(u32 entry, u32 usp): $4=entry, $5=usp. Punto de no
-// retorno normal: guarda ra/sp de quien llama en g_kexit_pc/g_kexit_sp (así
-// SYS_EXIT en trap.c puede reescribir el TrapFrame para "volver" ahí, como
-// si esta función hubiera hecho un return común) y salta a modo usuario.
-.section .text
-enter_user_mode:
-    la    $2, g_kexit_pc
-    sw    $31, 0($2)
-    la    $2, g_kexit_sp
-    sw    $29, 0($2)
-
-    // callee-saved (s0-s7/gp/fp): sin esto, lo que la app de usuario deje
-    // en estos registros pisaría el contexto del kernel al volver.
-    la    $2, g_kexit_ctx
-    sw    $16, 0($2)
-    sw    $17, 4($2)
-    sw    $18, 8($2)
-    sw    $19, 12($2)
-    sw    $20, 16($2)
-    sw    $21, 20($2)
-    sw    $22, 24($2)
-    sw    $23, 28($2)
-    sw    $28, 32($2)
-    sw    $30, 36($2)
-
-    move  $29, $5
-
-    mtc0  $4, $14 // EPC = entry
-    // EXL=1 todavía: mtc0 pega en el momento (sin hazard de pipeline como en
-    // hardware real), así que si KSU=usuario quedara activo ANTES del eret,
-    // el fetch del eret mismo (en kseg1) violaría el segmento. eret lo baja
-    // solo al ejecutarse (mismo mecanismo que exception_entry al volver).
-    li    $2, STATUS_BEV | STATUS_IE | STATUS_IM2 | STATUS_IM7 | STATUS_KSU_USER | STATUS_EXL
-    mtc0  $2, $12
+    // El ASID del proceso elegido (sched.c) se escribe recién ACÁ, después
+    // de la última lectura vía $sp: si se escribiera antes (p.ej. desde C,
+    // en sched_switch_to), todos los "jr $ra" de vuelta por
+    // sched_switch_to/sched_tick/handle_syscall/kernel_trap seguirían
+    // usando el stack de kuseg del proceso VIEJO, pero ya traducido contra
+    // la página del proceso NUEVO — corrompiendo el desenrolle. $k1 se pisa
+    // a propósito: por convención MIPS es de uso reservado del SO, ningún
+    // código debería depender de que sobreviva un cambio de contexto.
+    la    $27, g_next_asid
+    lw    $27, 0($27)
+    mtc0  $27, $10
 
     eret

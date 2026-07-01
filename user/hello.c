@@ -1,7 +1,7 @@
 // hello.c — primera app de usuario: prueba de punta a punta el pipeline
 // modo kernel/usuario + la ABI de syscalls (ver ../kernel/abi.h). Sin
-// boot.S propio: el $sp inicial lo arma el kernel antes del eret
-// (kernel/mm.c::user_map_and_load + boot.S::enter_user_mode).
+// boot.S propio: el $sp inicial lo arma el kernel (kernel/sched.c::sched_spawn)
+// antes de que el scheduler la haga correr por primera vez.
 #include "../kernel/abi.h"
 
 void _start(void) {
