@@ -96,6 +96,7 @@ static inline void cop0_tlbwi(void) {
 
 // console.c
 void console_init(void);
+void console_clear(void); // borra pantalla y vuelve el cursor a (0,0)
 void console_putc(char c);
 void console_puts(const char *s);
 void console_put_hex(u32 v);
@@ -106,16 +107,36 @@ void console_flush(void); // recompone el texto sobre el FB (gpu_flip)
 void kernel_trap(TrapFrame *tf);
 void keyboard_irq(void);
 void timer_tick(TrapFrame *tf);
+int gpu_owned_by_user(void); // 1 si un proceso tiene la pantalla (ver sys_gpu_init)
+void gpu_force_release(void); // Ctrl+C: la devuelve a la consola aunque el dueño no haya salido solo
 
 // shell.c
 void shell_init(void);
 void shell_input(char c);
 
+// Layout de vaddr de todo proceso de usuario (mm.c::mm_map_user y
+// sched.c::sched_spawn lo comparten: un solo lugar para no desincronizar
+// dónde arranca el programa, a qué vaddr apuntan los PT_LOAD del ELF, y
+// dónde cae el heap que ve malloc()/free() en userland — ver
+// user/malloc.h). Dos entradas de TLB por proceso (ver mm_map_user):
+// VPN2 A = prog+heap0, VPN2 B = heap1+stack.
+#define USER_VADDR 0x00400000u       // texto+datos+bss (una página, la del ELF)
+#define USER_HEAP_VADDR 0x00401000u  // heap: 2 páginas (8KB) — ver user/malloc.h
+#define USER_HEAP_SIZE 0x2000u
+#define USER_STACK_VADDR 0x00403000u // stack: una página, crece hacia abajo desde el tope
+
+// Slots de proceso: 0 es el propio kernel/shell, 1..MAX_PROCS-1 son de
+// usuario. Compartido entre sched.c (tabla de procesos) y mm.c (cada
+// proceso usa 2 índices de TLB, ver mm_map_user) para que no haya que
+// mantener el mismo número en dos lugares.
+#define MAX_PROCS 4
+
 // mm.c: memoria física + mecánica de TLB, sin política de proceso (eso es
 // de sched.c).
 u32 pmm_alloc_page(void);
-void pmm_write_page(u32 phys, const u8 *data, u32 len);
-void mm_map_user(u32 asid, u32 prog_phys, u32 stack_phys);
+void pmm_write_page(u32 phys, const u8 *data, u32 len);       // pisa la página entera (resto en 0)
+void pmm_write_page_at(u32 phys, u32 offset, const u8 *data, u32 len); // solo ese rango, no toca el resto
+void mm_map_user(u32 asid, u32 prog_phys, u32 heap0_phys, u32 heap1_phys, u32 stack_phys);
 
 // sched.c: scheduler round-robin. El proceso 0 es el propio kernel/shell.
 // g_next_asid: el ASID del proceso elegido en el último switch; lo escribe
@@ -127,8 +148,9 @@ int sched_current_pid(void);
 void sched_tick(TrapFrame *tf);       // preemption: la llama timer_tick
 void sched_block_current(TrapFrame *tf); // duerme al actual (sem_wait)
 void sched_wake(int pid);                // lo despierta (sem_signal)
-int sched_spawn(const u8 *img, u32 img_len, u32 arg0); // devuelve slot o -1
+int sched_spawn(const char *path, u32 arg0); // lee+parsea el ELF de disco; slot o -1
 void sched_exit_current(TrapFrame *tf);      // usan SYS_EXIT y el kill por fallo
+void sched_kill_all_user(void);              // Ctrl+C: corta todo lo que no sea el shell
 
 // sem.c: semáforos de Dijkstra (wait/signal), bloqueantes de verdad — sin
 // busy-wait, sched_block_current/sched_wake sacan y devuelven al proceso
@@ -137,11 +159,12 @@ void sem_init(int idx, int value);
 int sem_wait(TrapFrame *tf, int idx);    // devuelve 1 si bloqueó
 void sem_signal(int idx);
 
-// fs.c: filesystem plano sobre storage.h (montaje perezoso: recién toca el
-// device en el primer uso, ningún test que no lo use se ve afectado).
-int fs_create(const char *name, const u8 *data, u32 len); // 0 ok, -1 directorio lleno
-int fs_read(const char *name, u8 *buf, u32 maxlen);        // bytes leídos, -1 si no existe
-void fs_list(void);
+// fs.c: FAT32 de solo lectura sobre storage.h (montaje perezoso: recién
+// toca el device en el primer uso). Solo nombres cortos 8.3. Sin cwd propio
+// acá adentro: shell.c arma paths absolutos antes de llamar a estas.
+int fs_read(const char *path, u8 *buf, u32 maxlen); // bytes leídos, -1 si no existe o es directorio
+void fs_list(const char *path);                     // imprime error si el path no es un directorio
+int fs_is_dir(const char *path);                     // 1/0/-1 (no existe), para cd
 
 // kernel.c
 void kernel_main(void);

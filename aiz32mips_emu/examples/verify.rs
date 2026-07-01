@@ -15,9 +15,9 @@ use aiz32mips_core::elf;
 use aiz32mips_core::memory::MemoryBus;
 
 const RAM_BASE: u32 = 0x0000_0000;
-const RAM_SIZE: usize = 0x0020_0000;
+const RAM_SIZE: usize = 0x0800_0000; // 128MB
 const ROM_BASE: u32 = 0x1FC0_0000;
-const ROM_SIZE: usize = 0x0010_0000;
+const ROM_SIZE: usize = 0x0100_0000; // 16MB
 
 fn blit_segment(ram: &mut [u8], rom: &mut [u8], paddr: u32, data: &[u8]) {
     let end = paddr as u64 + data.len() as u64;

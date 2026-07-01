@@ -6,6 +6,32 @@
 
 static volatile u32 ticks = 0;
 
+// GPU ownership: mientras un proceso está "dueño" de la pantalla (desde su
+// sys_gpu_init hasta que sale o lo matan), console_flush() no toca la GPU
+// — si lo hiciera, el spinner del timer (más abajo) o el eco de teclado
+// pisarían el modo texto/doble-buffer del proceso en cada tick, así de
+// hecho desaparecía el cubo de cube3d.c antes de este fix, aun con
+// VRAM_USER_CMDBUF separado del buffer del kernel.
+static int gfx_owner_pid = -1;
+
+int gpu_owned_by_user(void) {
+    return gfx_owner_pid >= 0;
+}
+
+// Vuelve al modo consola de siempre (single-buffer 320x200, sin Z, texto
+// habilitado) y limpia lo que hubiera quedado en pantalla del proceso
+// gráfico.
+static void gfx_release(void) {
+    gfx_owner_pid = -1;
+    gpu_init(320, 200, 0, 0);
+    REG_TEXT_ENABLE = 1;
+    console_clear();
+}
+
+void gpu_force_release(void) {
+    gfx_release();
+}
+
 static void handle_syscall(TrapFrame *tf) {
     switch (tf->v0) {
         case SYS_PUTC:
@@ -24,6 +50,9 @@ static void handle_syscall(TrapFrame *tf) {
             }
             break;
         case SYS_EXIT:
+            if (sched_current_pid() == gfx_owner_pid) {
+                gfx_release();
+            }
             sched_exit_current(tf);
             return; // sin el epc+=4 de abajo: ya apunta donde corresponde
         case SYS_SEM_WAIT:
@@ -33,6 +62,42 @@ static void handle_syscall(TrapFrame *tf) {
             break; // no bloqueó: sigue normal, epc+=4 de abajo
         case SYS_SEM_SIGNAL:
             sem_signal((int)tf->a0);
+            break;
+        case SYS_GPU_INIT:
+            // A partir de acá el proceso es dueño de la pantalla (ver
+            // gfx_owner_pid arriba): apaga el texto, que a partir de ahora
+            // sólo lo pisaría.
+            gfx_owner_pid = sched_current_pid();
+            REG_TEXT_ENABLE = 0;
+            gpu_init((u16)tf->a0, (u16)tf->a1, (int)tf->a2, (int)tf->a3);
+            break;
+        case SYS_GPU_SUBMIT: {
+            // tf->a0 es un puntero kuseg del proceso que hizo el syscall:
+            // se puede desreferenciar tal cual porque el ASID/TLB activo
+            // en este preciso momento siguen siendo los suyos (nada los
+            // cambia entre el syscall y este handler, ver abi.h).
+            const u32 *src = (const u32 *)tf->a0;
+            u32 n = tf->a1;
+            if (n > 4096) { // tope defensivo: no pisar más allá de VRAM_USER_CMDBUF
+                n = 4096;
+            }
+            // VRAM_USER_CMDBUF, no VRAM_CMDBUF: esa la sigue usando el
+            // kernel para sus propios flips de consola (console_flush) —
+            // compartirla pisaba la display list del proceso a mitad de
+            // frame (ver el comentario en gpu.h).
+            volatile u32 *dst = (volatile u32 *)(VRAM_BASE + VRAM_USER_CMDBUF);
+            for (u32 i = 0; i < n; i++) {
+                dst[i] = src[i];
+            }
+            if (n > 0) {
+                REG_CMD_ADDR = VRAM_USER_CMDBUF;
+                REG_CMD_LEN = n;
+                REG_CMD_KICK = 1;
+            }
+            break;
+        }
+        case SYS_GPU_STATUS:
+            tf->v0 = REG_STATUS;
             break;
         default:
             console_puts("[trap] syscall desconocida: ");
@@ -67,6 +132,11 @@ void keyboard_irq(void) {
             u32 keycode = ev & 0xFF;
             if (keycode == 8 || keycode == 13) {
                 shell_input((char)keycode);
+            } else if (keycode == 'c' && (ev & KBD_MOD_CTRL)) {
+                // Ctrl+C: SDL no lo manda como TextInput (los combos con
+                // Ctrl quedan fuera de esa traducción), así que se arma acá
+                // el byte ASCII de ETX (3) que shell_input sabe interpretar.
+                shell_input((char)3);
             }
         }
     }
@@ -87,6 +157,13 @@ static void handle_interrupt(TrapFrame *tf) {
 // que se cayó. Lo matamos a él solo (mismo mecanismo que SYS_EXIT) en vez
 // de tirar todo el kernel abajo con kpanic.
 static void kill_user_process(TrapFrame *tf, u32 exc_code) {
+    // Antes de imprimir nada: si el que se cayó era el dueño de la
+    // pantalla, console_flush() de abajo no hace nada hasta que se libere
+    // (ver gfx_release) — sin esto el mensaje de error queda escrito en
+    // VRAM_TEXT pero invisible.
+    if (sched_current_pid() == gfx_owner_pid) {
+        gfx_release();
+    }
     console_putc('\n');
     console_puts("[user] proceso terminado por excepcion: ");
     console_puts(exc_name(exc_code));

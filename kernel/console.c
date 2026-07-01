@@ -13,9 +13,8 @@ static void con_newline(void) {
     cur_col = 0;
     cur_row++;
     if (cur_row >= CON_ROWS) {
-        // sin scroll real todavía: al llegar abajo, arranca de nuevo
-        cur_row = 0;
-        gpu_text_clear();
+        cur_row = CON_ROWS - 1;
+        gpu_text_scroll();
     }
 }
 
@@ -28,6 +27,12 @@ void console_init(void) {
     gpu_clear(RGB(0, 0, 0));
     gpu_flip();
     gpu_end();
+}
+
+void console_clear(void) {
+    cur_col = 0;
+    cur_row = 0;
+    gpu_text_clear();
 }
 
 void console_putc(char c) {
@@ -86,6 +91,13 @@ void console_put_uint(u32 v) {
 }
 
 void console_flush(void) {
+    // Mientras un proceso de usuario es dueño de la pantalla (ver
+    // gfx_owner_pid en trap.c), este flip no hace nada: si lo hiciera, el
+    // spinner del timer o el eco de teclado pisarían su modo texto/doble
+    // buffer en cada tick.
+    if (gpu_owned_by_user()) {
+        return;
+    }
     gpu_begin();
     gpu_flip();
     gpu_end();

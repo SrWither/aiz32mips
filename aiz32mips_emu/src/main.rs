@@ -4,6 +4,7 @@ mod ui;
 use std::env;
 use std::fs;
 use std::process;
+use std::time::{Duration, Instant};
 
 use aiz32mips_core::cop::CAUSE_IP2;
 use aiz32mips_core::cpu::CPU;
@@ -19,9 +20,9 @@ use mmio_offsets::*;
 use ui::display::SdlDisplay;
 
 const RAM_BASE: u32 = 0x0000_0000;
-const RAM_SIZE: usize = 0x0020_0000; // 2MB
+const RAM_SIZE: usize = 0x0800_0000; // 128MB
 const ROM_BASE: u32 = 0x1FC0_0000;
-const ROM_SIZE: usize = 0x0010_0000; // 1MB (los .bin actuales entran de sobra)
+const ROM_SIZE: usize = 0x0100_0000; // 16MB
 
 fn main() -> anyhow::Result<()> {
     // === args ===
@@ -169,37 +170,47 @@ fn main() -> anyhow::Result<()> {
     );
 
     // === loop ===
-    let mut steps_since_present = 0u32;
-    let present_every = 10_000; // ajustá esto según rendimiento
+    // Sondear input tiene que pasar seguido (si no, la ventana queda sin
+    // procesar sus eventos de sistema el tiempo suficiente como para que
+    // el SO la marque "no responde"). El present/vblank, en cambio, se
+    // gatea por RELOJ DE PARED (¬1/60s), no por cantidad de instrucciones:
+    // un conteo fijo de instrucciones paga a velocidades muy distintas
+    // según la máquina/build (debug vs release), así que un juego que hace
+    // gpu_wait_vblank() por frame (ver user/cube3d.c) terminaba girando a
+    // la velocidad que le tocara en instrucciones, no a 60fps de verdad.
+    let mut steps_since_poll = 0u32;
+    let poll_every: u32 = 20_000;
+    let frame_interval = Duration::from_secs_f64(1.0 / 60.0);
+    let mut last_present = Instant::now();
 
-    // El polling de eventos (pump_events) y el present van juntos, una vez
-    // cada `present_every` instrucciones — antes se llamaba
-    // pump_events_quit() en CADA instrucción de CPU, creando un EventPump
-    // nuevo y haciendo un poll de SDL/X11 millones de veces por segundo.
-    // Eso, no el intérprete, era el cuello de botella real del "1 fps"
-    // (el intérprete solo ya anda a varios millones de instrucciones/seg).
     if infinite {
         loop {
             cpu.step(&mut bus);
-            steps_since_present += 1;
-            if steps_since_present >= present_every {
-                steps_since_present = 0;
+            steps_since_poll += 1;
+            if steps_since_poll >= poll_every {
+                steps_since_poll = 0;
                 if poll_input(&mut sdl, &mut bus, &mut cpu) {
                     break;
                 }
-                present_and_pulse_vblank(&mut sdl, &mut bus);
+                if last_present.elapsed() >= frame_interval {
+                    present_and_pulse_vblank(&mut sdl, &mut bus);
+                    last_present = Instant::now();
+                }
             }
         }
     } else {
         for _ in 0..cycles {
             cpu.step(&mut bus);
-            steps_since_present += 1;
-            if steps_since_present >= present_every {
-                steps_since_present = 0;
+            steps_since_poll += 1;
+            if steps_since_poll >= poll_every {
+                steps_since_poll = 0;
                 if poll_input(&mut sdl, &mut bus, &mut cpu) {
                     break;
                 }
-                present_and_pulse_vblank(&mut sdl, &mut bus);
+                if last_present.elapsed() >= frame_interval {
+                    present_and_pulse_vblank(&mut sdl, &mut bus);
+                    last_present = Instant::now();
+                }
             }
         }
         // presenta al final

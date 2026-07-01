@@ -4,7 +4,8 @@
 // entrada de TLB (ver mm.c::mm_map_user) fijo desde que se crea.
 #include "kernel.h"
 
-#define MAX_PROCS 4
+// MAX_PROCS: en kernel.h (mm.c también lo necesita para separar los 2
+// índices de TLB de cada proceso, ver mm_map_user).
 
 typedef enum {
     PROC_UNUSED = 0,
@@ -77,7 +78,14 @@ static void sched_switch_to(TrapFrame *tf, int next) {
 // qué estado le queda al que se va.
 static void sched_save_and_switch(TrapFrame *tf, proc_state_t leave_state) {
     tf_copy(&proc_table[current_pid].ctx, tf);
-    proc_table[current_pid].state = leave_state;
+    // Si current_pid ya quedó UNUSED (sched_kill_all_user lo mató desde
+    // keyboard_irq mientras JUSTO era el proceso corriendo, ver Ctrl+C en
+    // shell.c) no lo resucitamos a READY acá: sin este chequeo, el
+    // siguiente tick de timer revivía un proceso ya matado — por eso
+    // "correr cube3d de nuevo" terminaba con dos instancias vivas.
+    if (proc_table[current_pid].state != PROC_UNUSED) {
+        proc_table[current_pid].state = leave_state;
+    }
     sched_switch_to(tf, sched_pick_next());
 }
 
@@ -101,13 +109,97 @@ void sched_wake(int pid) {
     }
 }
 
+// Ctrl+C desde el shell (trap.c::keyboard_irq): mata todo lo que no sea el
+// slot 0 (shell/kernel), sin importar su estado (corriendo, listo o
+// bloqueado en un semáforo — un pingpong colgado en sys_sem_wait se saca
+// así). No hay "proceso en foreground": es un botón de pánico simple, no
+// selectivo. El slot que estuviera activo en este mismo instante (si el
+// tick del teclado interrumpió a un proceso de usuario en vez de al
+// shell) corre una última vez hasta el próximo tick del timer, que ya lo
+// va a encontrar UNUSED y lo va a sacar de la rotación — no hace falta
+// forzar un context switch acá mismo.
+void sched_kill_all_user(void) {
+    for (int i = 1; i < MAX_PROCS; i++) {
+        proc_table[i].state = PROC_UNUSED;
+    }
+}
+
 void sched_exit_current(TrapFrame *tf) {
     // Sin guardar ctx: este proceso no vuelve, no tiene sentido.
     proc_table[current_pid].state = PROC_UNUSED;
     sched_switch_to(tf, sched_pick_next());
 }
 
-int sched_spawn(const u8 *img, u32 img_len, u32 arg0) {
+// ─────────────────────── carga de ELF32/MIPS desde disco ──────────────────
+// Parser mínimo, hermano en espíritu del de aiz32mips_core::elf (que corre
+// del lado host para bootear el propio kernel.elf): acá no hay Vec ni std,
+// así que un tope fijo de PT_LOAD alcanza y sobra para binarios que caben
+// en una sola página física (multi-página queda para cuando haya TLB
+// refill de verdad).
+#define ELF_MAX_SEGS 4
+#define ELF_BUF_SIZE 8192
+
+#define ELF_PT_LOAD 1u
+#define ELF_EM_MIPS 8u
+
+typedef struct {
+    u32 vaddr;
+    u32 offset;
+    u32 filesz;
+    u32 memsz;
+} ElfSeg;
+
+static u16 elf_rd16(const u8 *b, u32 off) {
+    return (u16)(b[off] | (b[off + 1] << 8));
+}
+
+static u32 elf_rd32(const u8 *b, u32 off) {
+    return (u32)b[off] | ((u32)b[off + 1] << 8) | ((u32)b[off + 2] << 16) | ((u32)b[off + 3] << 24);
+}
+
+// 0 ok, -1 si no es un ELF32 LE MIPS válido o tiene más PT_LOAD de los que
+// entran en segs[].
+static int elf_parse(const u8 *data, u32 len, u32 *entry, ElfSeg *segs, int *nsegs) {
+    if (len < 52 || data[0] != 0x7F || data[1] != 'E' || data[2] != 'L' || data[3] != 'F') {
+        return -1;
+    }
+    if (data[4] != 1 || data[5] != 1) { // ELFCLASS32, ELFDATA2LSB
+        return -1;
+    }
+    if (elf_rd16(data, 18) != ELF_EM_MIPS) {
+        return -1;
+    }
+    *entry = elf_rd32(data, 24);
+    u32 phoff = elf_rd32(data, 28);
+    u32 phentsize = elf_rd16(data, 42);
+    u32 phnum = elf_rd16(data, 44);
+
+    *nsegs = 0;
+    for (u32 i = 0; i < phnum; i++) {
+        u32 ph = phoff + i * phentsize;
+        if (ph + 32 > len) {
+            return -1;
+        }
+        if (elf_rd32(data, ph) != ELF_PT_LOAD) {
+            continue;
+        }
+        if (*nsegs >= ELF_MAX_SEGS) {
+            return -1;
+        }
+        ElfSeg *s = &segs[*nsegs];
+        s->offset = elf_rd32(data, ph + 4);
+        s->vaddr = elf_rd32(data, ph + 8);
+        s->filesz = elf_rd32(data, ph + 16);
+        s->memsz = elf_rd32(data, ph + 20);
+        if (s->offset + s->filesz > len) {
+            return -1;
+        }
+        (*nsegs)++;
+    }
+    return 0;
+}
+
+int sched_spawn(const char *path, u32 arg0) {
     int slot = -1;
     for (int i = 1; i < MAX_PROCS; i++) {
         if (proc_table[i].state == PROC_UNUSED) {
@@ -119,15 +211,50 @@ int sched_spawn(const u8 *img, u32 img_len, u32 arg0) {
         return -1;
     }
 
+    // static: sched_spawn siempre corre en contexto del shell (nunca
+    // reentra), así que un solo buffer de scratch alcanza — evita 8KB en
+    // un stack de kernel que ya es chico (ver el comentario equivalente en
+    // fs.c).
+    static u8 elf_buf[ELF_BUF_SIZE];
+    int n = fs_read(path, elf_buf, sizeof(elf_buf));
+    if (n <= 0) {
+        return -1;
+    }
+
+    u32 entry;
+    ElfSeg segs[ELF_MAX_SEGS];
+    int nsegs;
+    if (elf_parse(elf_buf, (u32)n, &entry, segs, &nsegs) < 0) {
+        return -1;
+    }
+
     u32 prog_phys = pmm_alloc_page();
+    u32 heap0_phys = pmm_alloc_page();
+    u32 heap1_phys = pmm_alloc_page();
     u32 stack_phys = pmm_alloc_page();
-    pmm_write_page(prog_phys, img, img_len);
+    pmm_write_page(prog_phys, 0, 0); // huecos entre segmentos y bss: en 0
+    for (int i = 0; i < nsegs; i++) {
+        // Todo PT_LOAD tiene que caer dentro de la única página de
+        // texto+datos del proceso (el heap y el stack son páginas aparte,
+        // ver mm.c): un ELF armado a mano o corrupto que pise esto se
+        // rechaza acá en vez de corromper la página de al lado.
+        if (segs[i].vaddr < USER_VADDR) {
+            return -1;
+        }
+        u32 seg_off = segs[i].vaddr - USER_VADDR;
+        if (seg_off + segs[i].memsz > 0x1000u) {
+            return -1;
+        }
+        pmm_write_page_at(prog_phys, seg_off, elf_buf + segs[i].offset, segs[i].filesz);
+    }
+    pmm_write_page(heap0_phys, 0, 0); // heap sin usar todavía: en 0 (ver user/malloc.h)
+    pmm_write_page(heap1_phys, 0, 0);
     pmm_write_page(stack_phys, 0, 0);
     // A diferencia de sched_switch_to, esto SÍ puede escribir EntryHi
     // directo: spawn siempre corre en contexto del shell (proceso 0), cuyo
     // propio stack vive en kseg1 (no traducido), así que no hay ventana de
     // desenrolle afectada por el ASID que quede puesto.
-    mm_map_user((u32)slot, prog_phys, stack_phys);
+    mm_map_user((u32)slot, prog_phys, heap0_phys, heap1_phys, stack_phys);
 
     TrapFrame *ctx = &proc_table[slot].ctx;
     u32 *words = (u32 *)ctx;
@@ -135,8 +262,8 @@ int sched_spawn(const u8 *img, u32 img_len, u32 arg0) {
         words[i] = 0;
     }
     ctx->a0 = arg0; // "rol": la app lo lee declarando void _start(int role)
-    ctx->sp = 0x00402000u; // tope del stack (página impar), crece hacia abajo
-    ctx->epc = 0x00400000u;
+    ctx->sp = USER_STACK_VADDR + 0x1000u; // tope del stack, crece hacia abajo
+    ctx->epc = entry;
     // EXL=1 acá también: el epílogo de exception_entry hace mtc0 del status
     // y DESPUÉS sigue buscando instrucciones (lw/eret) en kseg1 — si
     // KSU=usuario ya estuviera activo sin EXL enmascarándolo, ese fetch

@@ -1,1 +1,5 @@
 /target
+*.o
+*.img
+*.elf
+disk.img

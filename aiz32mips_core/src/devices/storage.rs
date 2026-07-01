@@ -5,7 +5,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 pub const BLOCK_SIZE: usize = 512;
-pub const BLOCK_COUNT: usize = 2048; // 1MB de disco
+pub const BLOCK_COUNT: usize = 524288; // 256MB de disco (FAT32: márgen para /bin, /lib, /include, /home)
 pub const DISK_SIZE: usize = BLOCK_SIZE * BLOCK_COUNT;
 
 const CMD_READ: u32 = 1;

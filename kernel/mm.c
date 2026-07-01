@@ -24,21 +24,39 @@ void pmm_write_page(u32 phys, const u8 *data, u32 len) {
     }
 }
 
-// Vaddr fija de todo proceso de usuario: como el TLB matchea por
-// (vpn2,asid) y cada proceso tiene su propio ASID, no hay colisión aunque
-// todos compartan la misma dirección. Página par = texto+datos+bss (tiene
-// que entrar en 4KB); página impar = stack.
-#define USER_VADDR 0x00400000u
+// A diferencia de pmm_write_page, no toca el resto de la página: la usa
+// sched.c para volcar cada PT_LOAD de un ELF a su offset dentro de la
+// misma página física (varios segmentos comparten página, así que zero-
+// llenarla en cada llamada pisaría los segmentos ya copiados).
+void pmm_write_page_at(u32 phys, u32 offset, const u8 *data, u32 len) {
+    u8 *dst = (u8 *)(0x80000000u + phys + offset);
+    for (u32 i = 0; i < len; i++) {
+        dst[i] = data[i];
+    }
+}
 
-void mm_map_user(u32 asid, u32 prog_phys, u32 stack_phys) {
-    // Una sola entrada de TLB (par/impar de 4KB = 8KB por VPN2) cubre las
-    // dos páginas. Índice == ASID == slot de la tabla de procesos
-    // (sched.c): se escribe una sola vez al spawnear, nunca se reescribe
-    // en cada cambio de contexto.
-    cop0_write_index(asid);
-    cop0_write_entryhi((USER_VADDR & ~0x1FFFu) | asid);
-    cop0_write_entrylo0(((prog_phys >> 12) << 6) | (1u << 2) | (1u << 1)); // D=1,V=1
-    cop0_write_entrylo1(((stack_phys >> 12) << 6) | (1u << 2) | (1u << 1));
+static void tlb_write_pair(u32 index, u32 vaddr_even, u32 phys_even, u32 phys_odd) {
+    cop0_write_index(index);
+    cop0_write_entryhi((vaddr_even & ~0x1FFFu) | (index % MAX_PROCS));
+    cop0_write_entrylo0(((phys_even >> 12) << 6) | (1u << 2) | (1u << 1)); // D=1,V=1
+    cop0_write_entrylo1(((phys_odd >> 12) << 6) | (1u << 2) | (1u << 1));
     cop0_write_pagemask(0);
     cop0_tlbwi();
+}
+
+// Vaddr fija de todo proceso de usuario (USER_VADDR/USER_HEAP_VADDR/
+// USER_STACK_VADDR, kernel.h): como el TLB matchea por (vpn2,asid) y cada
+// proceso tiene su propio ASID, no hay colisión aunque todos compartan la
+// misma dirección. Dos entradas de TLB por proceso (cada una cubre un
+// VPN2 = 8KB, par+impar): la primera junta prog+heap0, la segunda
+// heap1+stack — así entra un heap real de 8KB sin que cada proceso
+// necesite más de 2 índices de TLB (con MAX_PROCS=4 son 8 de los 16 que
+// tiene el core, sobra margen). El índice de la 2da entrada se corre
+// MAX_PROCS lugares para no pisar la del slot de al lado; el ASID (bits
+// bajos de EntryHi, no el índice) es el mismo en ambas: por eso
+// tlb_write_pair calcula el ASID como `index % MAX_PROCS` en vez de
+// recibirlo aparte.
+void mm_map_user(u32 asid, u32 prog_phys, u32 heap0_phys, u32 heap1_phys, u32 stack_phys) {
+    tlb_write_pair(asid, USER_VADDR, prog_phys, heap0_phys);
+    tlb_write_pair(asid + MAX_PROCS, USER_HEAP_VADDR + 0x1000u, heap1_phys, stack_phys);
 }

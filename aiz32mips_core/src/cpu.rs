@@ -690,6 +690,59 @@ impl CPU {
                         }
                         return 0;
                     }
+                    0x22 | 0x26 => {
+                        // LWL/LWR rt, offset(rs): carga de word sin alinear.
+                        // El compilador las emite en pares (LWR en `a`, LWL
+                        // en `a+3`) para leer un u32 LE desde un puntero a
+                        // byte que no cae en múltiplo de 4 — patrón normal
+                        // en código que parsea structs desde un buffer
+                        // (ELF, FAT32, etc). Cada instrucción sólo toca
+                        // parte de rt (las demás lanes quedan como estaban),
+                        // así que el orden entre LWL y LWR no importa.
+                        let addr = rs_val.wrapping_add(imm_u);
+                        let aligned = addr & !3;
+                        let n = addr & 3;
+                        if let Some(word) = self.mem_read32(bus, aligned, instr_pc, in_delay_slot) {
+                            let val = if i.opcode == 0x22 {
+                                let shift = (3 - n) * 8;
+                                let keep = (1u32 << shift).wrapping_sub(1);
+                                (rt_val & keep) | (word << shift)
+                            } else {
+                                let shift = n * 8;
+                                let keep = if shift == 0 { 0 } else { 0xFFFF_FFFFu32 << (32 - shift) };
+                                (rt_val & keep) | (word >> shift)
+                            };
+                            if i.rt != 0 {
+                                self.registers.write(i.rt as usize, val);
+                            }
+                            return val;
+                        }
+                        return 0;
+                    }
+                    0x2A | 0x2E => {
+                        // SWL/SWR rt, offset(rs): contraparte de escritura
+                        // de LWL/LWR (read-modify-write sobre la word
+                        // alineada que contiene addr). Las máscaras de "qué
+                        // se conserva" quedan cruzadas respecto a la lectura:
+                        // SWL protege los bytes altos de memoria (como
+                        // protegía LWR en rt) y SWR los bajos (como LWL).
+                        let addr = rs_val.wrapping_add(imm_u);
+                        let aligned = addr & !3;
+                        let n = addr & 3;
+                        if let Some(old_mem) = self.mem_read32(bus, aligned, instr_pc, in_delay_slot) {
+                            let new_mem = if i.opcode == 0x2A {
+                                let shift = (3 - n) * 8;
+                                let keep = if shift == 0 { 0 } else { 0xFFFF_FFFFu32 << (32 - shift) };
+                                (old_mem & keep) | (rt_val >> shift)
+                            } else {
+                                let shift = n * 8;
+                                let keep = (1u32 << shift).wrapping_sub(1);
+                                (old_mem & keep) | (rt_val << shift)
+                            };
+                            self.mem_write32(bus, aligned, new_mem, instr_pc, in_delay_slot);
+                        }
+                        return 0;
+                    }
                     0x28 => {
                         // SB rt, offset(rs)
                         let addr = rs_val.wrapping_add(imm_u);
@@ -1161,6 +1214,89 @@ mod tests {
         assert_eq!(cpu.registers.get_pc(), 0xBFC0_0180);
         assert_eq!((cpu.cop0.cause() >> 2) & 0x1F, ExcCode::Ov.code());
         assert_eq!(cpu.registers.read(6), 0); // no se escribió rd
+    }
+
+    fn itype(opcode: u32, rs: u32, rt: u32, imm: u16) -> u32 {
+        (opcode << 26) | (rs << 21) | (rt << 16) | (imm as u32)
+    }
+
+    // LWL/LWR $rt, offset($rs): el par que clang emite (LWR en `a`, LWL en
+    // `a+3`) para reconstruir un u32 LE leído desde un puntero a byte que no
+    // cae en múltiplo de 4 — el patrón exacto que dejó `[ALU] Unhandled
+    // I-type opcode 0x22/0x26` corrompiendo lecturas de FAT32 en el kernel
+    // antes de este fix. Se prueban las 4 fases de desalineación y ambos
+    // órdenes de emisión, ya que cada instrucción sólo debe tocar su mitad
+    // de rt.
+    #[test]
+    fn lwl_lwr_reconstruct_unaligned_little_endian_word() {
+        let bytes: [u8; 8] = [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+        let base = 0x8000_1000u32;
+
+        for k in 0..4u32 {
+            for reversed in [false, true] {
+                let (mut cpu, mut bus) = new_test_system();
+                store_word(&mut bus, base, u32::from_le_bytes(bytes[0..4].try_into().unwrap()));
+                store_word(&mut bus, base + 4, u32::from_le_bytes(bytes[4..8].try_into().unwrap()));
+
+                let addr = base + k;
+                let expected =
+                    u32::from_le_bytes(bytes[k as usize..k as usize + 4].try_into().unwrap());
+
+                cpu.registers.write(4, addr);
+                cpu.registers.write(5, 0xFFFF_FFFF); // basura: confirma que ambas mitades se pisan
+                cpu.registers.special.pc = 0x8000_0000;
+
+                let (first, second) = if reversed {
+                    (itype(0x22, 4, 5, 3), itype(0x26, 4, 5, 0)) // LWL, LWR
+                } else {
+                    (itype(0x26, 4, 5, 0), itype(0x22, 4, 5, 3)) // LWR, LWL
+                };
+                store_word(&mut bus, 0x8000_0000, first);
+                store_word(&mut bus, 0x8000_0004, second);
+                cpu.step(&mut bus);
+                cpu.step(&mut bus);
+
+                assert_eq!(cpu.registers.read(5), expected, "k={k} reversed={reversed}");
+            }
+        }
+    }
+
+    // SWL/SWR: la contraparte de escritura. Guarda un valor conocido en una
+    // dirección desalineada y lo relee byte a byte (sin pasar por LWL/LWR)
+    // para no depender del test anterior.
+    #[test]
+    fn swl_swr_store_unaligned_little_endian_word() {
+        let base = 0x8000_1000u32;
+        let value = 0x4433_2211u32;
+
+        for k in 0..4u32 {
+            for reversed in [false, true] {
+                let (mut cpu, mut bus) = new_test_system();
+                store_word(&mut bus, base, 0xAAAA_AAAA);
+                store_word(&mut bus, base + 4, 0xAAAA_AAAA);
+
+                let addr = base + k;
+                cpu.registers.write(4, addr);
+                cpu.registers.write(5, value);
+                cpu.registers.special.pc = 0x8000_0000;
+
+                let (first, second) = if reversed {
+                    (itype(0x2A, 4, 5, 3), itype(0x2E, 4, 5, 0)) // SWL, SWR
+                } else {
+                    (itype(0x2E, 4, 5, 0), itype(0x2A, 4, 5, 3)) // SWR, SWL
+                };
+                store_word(&mut bus, 0x8000_0000, first);
+                store_word(&mut bus, 0x8000_0004, second);
+                cpu.step(&mut bus);
+                cpu.step(&mut bus);
+
+                let mut got = [0u8; 4];
+                for (i, b) in got.iter_mut().enumerate() {
+                    *b = bus.read8_virt(addr + i as u32).unwrap();
+                }
+                assert_eq!(u32::from_le_bytes(got), value, "k={k} reversed={reversed}");
+            }
+        }
     }
 
     #[test]
