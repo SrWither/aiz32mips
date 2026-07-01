@@ -13,7 +13,9 @@ PROGRAMS = hello pingpong cube3d
 
 all: $(PROGRAMS:%=%.bin)
 
-%.o: %.c ../kernel/abi.h gpu_user.h ../aiz32mips_emu/data/gpu_math.h
+LIBC_HDRS = libc/string.h libc/stdlib.h libc/stdio.h
+
+%.o: %.c ../kernel/abi.h ../kernel/gpu_math.h gpu_user.h $(LIBC_HDRS)
 	$(CLANG) $(CFLAGS) -c $< -o $@
 
 # -z max-page-size=4096: sin esto lld separa cada PT_LOAD a offsets de

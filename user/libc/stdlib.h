@@ -1,13 +1,25 @@
-// malloc.h — allocator chico para userland: free-list simple (first-fit,
-// fusiona con el siguiente bloque libre al hacer free), sin libc de por
-// medio. Opera sobre USER_HEAP_VADDR/USER_HEAP_SIZE (kernel/kernel.h): dos
-// páginas fijas que el kernel ya deja mapeadas al spawnear el proceso
-// (ver kernel/sched.c y kernel/mm.c::mm_map_user) — no hay brk/sbrk
-// todavía, el heap no crece más allá de esas 8KB.
-#ifndef AIZ_MALLOC_H
-#define AIZ_MALLOC_H
+// stdlib.h — malloc/free (free-list simple, first-fit, fusiona con el
+// siguiente bloque libre al hacer free) sobre el heap fijo de 8KB que el
+// kernel deja mapeado al spawnear el proceso (USER_HEAP_VADDR/
+// USER_HEAP_SIZE en kernel/kernel.h, ver kernel/mm.c::mm_map_user). Sin
+// brk/sbrk todavía: el heap no crece más allá de esas 8KB. + exit() sobre
+// sys_exit().
+#ifndef AIZ_LIBC_STDLIB_H
+#define AIZ_LIBC_STDLIB_H
 
+#ifndef AIZ_GPU_TYPES_DEFINED
+#define AIZ_GPU_TYPES_DEFINED
+typedef unsigned char u8;
+typedef unsigned short u16;
 typedef unsigned int u32;
+typedef int i32;
+#endif
+
+#include "../../kernel/abi.h"
+
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
 
 #define HEAP_BASE 0x00401000u
 #define HEAP_SIZE 0x2000u
@@ -32,7 +44,7 @@ static inline void heap_init_once(void) {
 
 static inline void *malloc(u32 size) {
     heap_init_once();
-    size = (size + 7u) & ~7u; // alineado a 8: los gpu_vertex_t/fx_t lo agradecen
+    size = (size + 7u) & ~7u; // alineado a 8: gpu_vertex_t/fx_t lo agradecen
 
     block_header_t *b = heap_free_list;
     while (b) {
@@ -72,4 +84,15 @@ static inline void free(void *ptr) {
     }
 }
 
-#endif // AIZ_MALLOC_H
+static inline int abs(int x) {
+    return x < 0 ? -x : x;
+}
+
+// sys_exit() no lleva status de salida (no hay quién lo lea todavía: sin
+// proceso padre esperando, ver kernel/sched.c) — se ignora, no se pierde.
+static inline void exit(int code) {
+    (void)code;
+    sys_exit();
+}
+
+#endif // AIZ_LIBC_STDLIB_H

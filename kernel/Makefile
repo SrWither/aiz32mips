@@ -6,11 +6,13 @@ LINK_FMT  = elf32ltsmip
 ELF_FMT   = elf32-little
 
 # -G0: sin small-data/gp-relative (no inicializamos $gp en boot.S).
+# gpu.h/gpu_math.h/keyboard.h/storage.h viven acá mismo (kernel/): no hace
+# falta ningún -I, el include con comillas ya los encuentra en el mismo
+# directorio que el .c que los pide.
 CFLAGS  = -target $(ARCH) -mips32 -ffreestanding -fno-pic -fno-builtin \
-          -fomit-frame-pointer -G0 -O2 -nostdlib -static -Wall \
-          -I../aiz32mips_emu/data
+          -fomit-frame-pointer -G0 -O2 -nostdlib -static -Wall
 ASFLAGS = -target $(ARCH) -mips32 -ffreestanding -fno-pic -G0 -nostdlib \
-          -D__ASSEMBLER__ -I../aiz32mips_emu/data -c
+          -D__ASSEMBLER__ -c
 
 C_SRCS  = kernel.c console.c trap.c shell.c mm.c sched.c sem.c fs.c
 OBJS    = boot.o $(C_SRCS:.c=.o)

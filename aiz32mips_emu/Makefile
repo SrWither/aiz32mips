@@ -23,8 +23,12 @@ $(SRC_DIR)/%.bin: $(SRC_DIR)/%.s
 	@rm -f $(SRC_DIR)/$*.o $(SRC_DIR)/$*.elf
 	@echo "$@"
 
+# -I../kernel: gpu.h/gpu_math.h/keyboard.h se mudaron ahí (son drivers de
+# MMIO, uso genuino de kernel; ver kernel/Makefile). Los .c de acá siguen
+# siendo tests standalone contra la GPU/teclado reales, sin kernel de por
+# medio.
 $(SRC_DIR)/%.bin: $(SRC_DIR)/%.c
-	@$(CLANG) -target $(ARCH) -mips32 -ffreestanding -fno-pic -fno-builtin -O2 -nostdlib -static -c $< -o $(SRC_DIR)/$*.o
+	@$(CLANG) -target $(ARCH) -mips32 -ffreestanding -fno-pic -fno-builtin -O2 -nostdlib -static -I../kernel -c $< -o $(SRC_DIR)/$*.o
 	@$(LD_LLD) -m $(LINK_FMT) -Ttext=$(TEXT_ADDR) -e $(ENTRY) --emit-relocs --noinhibit-exec --oformat=$(ELF_FMT) $(SRC_DIR)/$*.o -o $(SRC_DIR)/$*.elf
 	@$(OBJCOPY) -O binary $(SRC_DIR)/$*.elf $@
 # 	@rm -f $(SRC_DIR)/$*.o $(SRC_DIR)/$*.elf

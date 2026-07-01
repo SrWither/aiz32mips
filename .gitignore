@@ -3,3 +3,4 @@
 *.img
 *.elf
 disk.img
+*.bin

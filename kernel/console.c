@@ -1,5 +1,5 @@
 // console.c — consola de texto del kernel, arriba del modo texto por
-// hardware de la GPU (ver aiz32mips_emu/data/gpu.h).
+// hardware de la GPU (ver kernel/gpu.h).
 #include "gpu.h"
 #include "kernel.h"
 

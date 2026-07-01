@@ -1,17 +1,16 @@
-// gpu_user.h — mismo API de comandos que aiz32mips_emu/data/gpu.h, pero
-// para userland: kuseg no tiene acceso a VRAM/MMIO (viven en kseg1, fuera
-// del alcance de cualquier TLB), así que acá se arma la display list en un
-// buffer local del propio proceso y se manda entera de una con una sola
-// syscall (sys_gpu_submit) — el kernel la copia a VRAM_CMDBUF y hace el
-// kick (ver kernel/trap.c). Mismos nombres de función que gpu.h a
-// propósito: "portar" un demo es -en teoría- nada más que cambiar el
-// #include.
+// gpu_user.h — mismo API de comandos que kernel/gpu.h, pero para userland:
+// kuseg no tiene acceso a VRAM/MMIO (viven en kseg1, fuera del alcance de
+// cualquier TLB), así que acá se arma la display list en un buffer local
+// del propio proceso y se manda entera de una con una sola syscall
+// (sys_gpu_submit) — el kernel la copia a VRAM_CMDBUF y hace el kick (ver
+// kernel/trap.c). Mismos nombres de función que gpu.h a propósito:
+// "portar" un demo es -en teoría- nada más que cambiar el #include.
 #ifndef AIZ_GPU_USER_H
 #define AIZ_GPU_USER_H
 
 #include "../kernel/abi.h"
-#include "../aiz32mips_emu/data/gpu_math.h"
-#include "malloc.h"
+#include "../kernel/gpu_math.h"
+#include "libc/stdlib.h"
 
 // Mismos opcodes/flags que gpu.h (tienen que matchear
 // aiz32mips_core::devices::gpu) — subset chico, sólo lo que usa cube3d.c
