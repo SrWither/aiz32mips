@@ -1,9 +1,13 @@
 // stdlib.h — malloc/free (free-list simple, first-fit, fusiona con el
-// siguiente bloque libre al hacer free) sobre el heap fijo de 8KB que el
-// kernel deja mapeado al spawnear el proceso (USER_HEAP_VADDR/
-// USER_HEAP_SIZE en kernel/kernel.h, ver kernel/mm.c::mm_map_user). Sin
-// brk/sbrk todavía: el heap no crece más allá de esas 8KB. + exit() sobre
-// sys_exit().
+// siguiente bloque libre al hacer free) sobre el heap de 16MB *virtuales*
+// que el kernel resuelve con demanda de páginas (USER_HEAP_VADDR/
+// USER_HEAP_SIZE en kernel/kernel.h, ver kernel/mm.c::mm_handle_page_fault):
+// nada de esos 16MB es RAM real hasta que malloc realmente entrega un
+// puntero ahí adentro y el proceso lo toca — recién en ese momento el
+// kernel arma la página física. Sin brk/sbrk explícito: como el heap
+// entero ya es "válido" de punta a punta (aunque no esté respaldado
+// todavía), no hace falta pedirle permiso al kernel para crecer. + exit()
+// sobre sys_exit().
 #ifndef AIZ_LIBC_STDLIB_H
 #define AIZ_LIBC_STDLIB_H
 
@@ -21,8 +25,8 @@ typedef int i32;
 #define NULL ((void *)0)
 #endif
 
-#define HEAP_BASE 0x00401000u
-#define HEAP_SIZE 0x2000u
+#define HEAP_BASE 0x10000000u
+#define HEAP_SIZE 0x01000000u
 
 typedef struct block_header {
     u32 size; // bytes de datos que sigue al header, sin contarlo a él
@@ -65,7 +69,7 @@ static inline void *malloc(u32 size) {
         }
         b = b->next;
     }
-    return 0; // sin memoria (heap de 8KB, no hay a dónde crecer)
+    return 0; // sin memoria (se acabaron los 16MB virtuales del heap)
 }
 
 static inline void free(void *ptr) {

@@ -62,6 +62,11 @@ void kernel_main(void) {
     console_puts("AIZ-32 mini kernel\n");
     console_puts("excepciones + timer (IP7) + teclado (IP2) por IRQ\n\n");
 
+    // Wired=MAX_PROCS: reserva un índice de TLB por proceso para su
+    // entrada de texto+stack, deja el resto para el heap con demanda de
+    // páginas (ver mm_handle_page_fault) — antes de spawnear nada.
+    mm_init();
+
     // proceso 0 = este mismo kernel/shell; se registra antes de habilitar
     // interrupciones para que el primer tick del timer ya tenga a quién
     // guardar el contexto.

@@ -198,16 +198,29 @@ void kernel_trap(TrapFrame *tf) {
     switch (exc_code) {
         case EXC_INT:
             handle_interrupt(tf);
-            break;
+            return;
         case EXC_SYS:
             handle_syscall(tf);
-            break;
-        default:
-            if ((tf->status & STATUS_KSU_MASK) == STATUS_KSU_USER) {
-                kill_user_process(tf, exc_code);
-            } else {
-                kpanic(tf, "excepcion no manejada");
+            return;
+        case EXC_TLBL:
+        case EXC_TLBS:
+            // TLB refill/inválida: antes de tratarla como un bug del
+            // proceso, fijarse si cae en su heap (con demanda de páginas,
+            // ver mm_handle_page_fault) — si es así, se arma la entrada
+            // de TLB que faltaba y volvemos sin tocar epc, para que la
+            // instrucción que voló se reintente sola (a diferencia de una
+            // syscall, acá no hay "+4" que valga).
+            if ((tf->status & STATUS_KSU_MASK) == STATUS_KSU_USER && mm_handle_page_fault(tf->badvaddr)) {
+                return;
             }
+            break; // no era del heap (o pasó en modo kernel): es una excepción de verdad
+        default:
             break;
+    }
+
+    if ((tf->status & STATUS_KSU_MASK) == STATUS_KSU_USER) {
+        kill_user_process(tf, exc_code);
+    } else {
+        kpanic(tf, "excepcion no manejada");
     }
 }

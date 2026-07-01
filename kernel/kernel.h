@@ -93,6 +93,35 @@ static inline void cop0_write_index(u32 v) {
 static inline void cop0_tlbwi(void) {
     __asm__ volatile("tlbwi");
 }
+static inline void cop0_write_wired(u32 v) {
+    __asm__ volatile("mtc0 %0, $6" : : "r"(v));
+}
+static inline u32 cop0_read_entryhi(void) {
+    u32 v;
+    __asm__ volatile("mfc0 %0, $10" : "=r"(v));
+    return v;
+}
+// TLBWR: como tlbwi, pero a un índice "random" entre Wired y TLB_ENTRIES-1
+// (el core lo recalcula a partir de Count, ver aiz32mips_core::cpu). La
+// usa mm_handle_page_fault para el heap con demanda de páginas: a
+// diferencia de prog/stack (wired, índice fijo por proceso), las páginas
+// de heap comparten los índices no-wired entre todos los procesos y se
+// van reemplazando.
+static inline void cop0_tlbwr(void) {
+    __asm__ volatile("tlbwr");
+}
+// TLBR: vuelca la entrada en Index hacia EntryHi/EntryLo0/EntryLo1/
+// PageMask (para poder leerla con cop0_read_entryhi después). La usa
+// mm_reset_heap para encontrar y tirar abajo entradas de un proceso que
+// ya murió, antes de que su ASID lo reuse otro.
+static inline void cop0_tlbr(void) {
+    __asm__ volatile("tlbr");
+}
+
+// Tamaño real del TLB del core (aiz32mips_core::tlb::TLB_ENTRIES): no hay
+// forma de leerlo en runtime, así que queda hardcodeado acá — si el core
+// cambia esto alguna vez, hay que actualizarlo a mano.
+#define TLB_ENTRIES 16
 
 // console.c
 void console_init(void);
@@ -114,21 +143,28 @@ void gpu_force_release(void); // Ctrl+C: la devuelve a la consola aunque el due�
 void shell_init(void);
 void shell_input(char c);
 
-// Layout de vaddr de todo proceso de usuario (mm.c::mm_map_user y
-// sched.c::sched_spawn lo comparten: un solo lugar para no desincronizar
-// dónde arranca el programa, a qué vaddr apuntan los PT_LOAD del ELF, y
-// dónde cae el heap que ve malloc()/free() en userland — ver
-// user/libc/stdlib.h). Dos entradas de TLB por proceso (ver mm_map_user):
-// VPN2 A = prog+heap0, VPN2 B = heap1+stack.
+// Layout de vaddr de todo proceso de usuario (mm.c y sched.c lo comparten:
+// un solo lugar para no desincronizar dónde arranca el programa, a qué
+// vaddr apuntan los PT_LOAD del ELF, y dónde cae el heap que ve
+// malloc()/free() en userland — ver user/libc/stdlib.h).
+//
+// Una sola entrada de TLB *wired* por proceso para texto+stack (índice ==
+// ASID == slot, fijo desde sched_spawn/sched_fork, nunca se mueve). El
+// heap es otra historia: es grande (16MB virtuales) pero se mapea de a
+// una página de 4KB por vez, recién cuando el proceso la toca de verdad
+// (TLB refill, ver mm_handle_page_fault) — para eso no hay wired de sobra
+// (Wired=MAX_PROCS dedicados a texto+stack, el resto del TLB rota entre
+// TODOS los procesos con tlbwr).
 #define USER_VADDR 0x00400000u       // texto+datos+bss (una página, la del ELF)
-#define USER_HEAP_VADDR 0x00401000u  // heap: 2 páginas (8KB) — ver user/malloc.h
-#define USER_HEAP_SIZE 0x2000u
-#define USER_STACK_VADDR 0x00403000u // stack: una página, crece hacia abajo desde el tope
+#define USER_STACK_VADDR 0x00401000u // stack: una página, crece hacia abajo desde el tope (mismo VPN2 que prog)
+
+#define USER_HEAP_VADDR 0x10000000u  // heap: región grande, con demanda de páginas (ver mm_handle_page_fault)
+#define USER_HEAP_SIZE 0x01000000u   // 16MB virtuales — nada de esto es RAM real hasta que se toca
 
 // Slots de proceso: 0 es el propio kernel/shell, 1..MAX_PROCS-1 son de
 // usuario. Compartido entre sched.c (tabla de procesos) y mm.c (cada
-// proceso usa 2 índices de TLB, ver mm_map_user) para que no haya que
-// mantener el mismo número en dos lugares.
+// proceso usa 1 índice de TLB wired + su cupo del heap compartido) para
+// que no haya que mantener el mismo número en dos lugares.
 #define MAX_PROCS 4
 
 // mm.c: memoria física + mecánica de TLB, sin política de proceso (eso es
@@ -137,7 +173,11 @@ u32 pmm_alloc_page(void);
 void pmm_write_page(u32 phys, const u8 *data, u32 len);       // pisa la página entera (resto en 0)
 void pmm_write_page_at(u32 phys, u32 offset, const u8 *data, u32 len); // solo ese rango, no toca el resto
 void pmm_copy_page(u32 dst_phys, u32 src_phys);                        // la usa sched_fork
-void mm_map_user(u32 asid, u32 prog_phys, u32 heap0_phys, u32 heap1_phys, u32 stack_phys);
+void mm_init(void);                                            // fija Wired al boot, antes de spawnear nada
+void mm_map_user(u32 asid, u32 prog_phys, u32 stack_phys);      // entrada wired de texto+stack
+int mm_handle_page_fault(u32 badvaddr); // TLB refill/inválida en el heap: 1 si se resolvió, 0 si no era del heap
+void mm_reset_heap(u32 asid); // limpia la tabla de páginas + invalida entradas viejas de ese ASID (spawn/fork lo reusan)
+void mm_fork_heap(u32 child_asid, u32 parent_asid); // copia las páginas de heap ya tocadas por el padre
 
 // sched.c: scheduler round-robin. El proceso 0 es el propio kernel/shell.
 // g_next_asid: el ASID del proceso elegido en el último switch; lo escribe

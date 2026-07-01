@@ -17,10 +17,12 @@ typedef enum {
 typedef struct {
     TrapFrame ctx;
     proc_state_t state;
-    // Las 4 páginas físicas del proceso (ver mm_map_user): sched_spawn las
-    // calcula pero antes las tiraba después de mapearlas — sched_fork
-    // necesita poder leerlas de vuelta para saber qué copiarle al hijo.
-    u32 prog_phys, heap0_phys, heap1_phys, stack_phys;
+    // Las 2 páginas wired del proceso (texto+stack, ver mm_map_user):
+    // sched_spawn las calcula pero antes las tiraba después de mapearlas —
+    // sched_fork necesita poder leerlas de vuelta para saber qué copiarle
+    // al hijo. El heap NO vive acá: es de mm.c (mm_fork_heap), tiene su
+    // propia tabla de páginas por ASID.
+    u32 prog_phys, stack_phys;
 } Process;
 
 static Process proc_table[MAX_PROCS];
@@ -237,15 +239,13 @@ int sched_spawn(const char *path, u32 arg0) {
     }
 
     u32 prog_phys = pmm_alloc_page();
-    u32 heap0_phys = pmm_alloc_page();
-    u32 heap1_phys = pmm_alloc_page();
     u32 stack_phys = pmm_alloc_page();
     pmm_write_page(prog_phys, 0, 0); // huecos entre segmentos y bss: en 0
     for (int i = 0; i < nsegs; i++) {
         // Todo PT_LOAD tiene que caer dentro de la única página de
-        // texto+datos del proceso (el heap y el stack son páginas aparte,
-        // ver mm.c): un ELF armado a mano o corrupto que pise esto se
-        // rechaza acá en vez de corromper la página de al lado.
+        // texto+datos del proceso (el stack es página aparte, el heap ni
+        // eso — ver mm.c): un ELF armado a mano o corrupto que pise esto
+        // se rechaza acá en vez de corromper la página de al lado.
         if (segs[i].vaddr < USER_VADDR) {
             return -1;
         }
@@ -255,17 +255,19 @@ int sched_spawn(const char *path, u32 arg0) {
         }
         pmm_write_page_at(prog_phys, seg_off, elf_buf + segs[i].offset, segs[i].filesz);
     }
-    pmm_write_page(heap0_phys, 0, 0); // heap sin usar todavía: en 0 (ver user/libc/stdlib.h)
-    pmm_write_page(heap1_phys, 0, 0);
     pmm_write_page(stack_phys, 0, 0);
+    // mm_reset_heap ANTES de mapear: si este slot lo tuvo otro proceso
+    // antes, hay que limpiar su tabla de páginas de heap y tirar abajo
+    // cualquier entrada de TLB que le hubiera quedado viva con este mismo
+    // ASID (ver el comentario de mm_reset_heap) — si no, el proceso nuevo
+    // podría heredar heap ajeno.
+    mm_reset_heap((u32)slot);
     // A diferencia de sched_switch_to, esto SÍ puede escribir EntryHi
     // directo: spawn siempre corre en contexto del shell (proceso 0), cuyo
     // propio stack vive en kseg1 (no traducido), así que no hay ventana de
     // desenrolle afectada por el ASID que quede puesto.
-    mm_map_user((u32)slot, prog_phys, heap0_phys, heap1_phys, stack_phys);
+    mm_map_user((u32)slot, prog_phys, stack_phys);
     proc_table[slot].prog_phys = prog_phys;
-    proc_table[slot].heap0_phys = heap0_phys;
-    proc_table[slot].heap1_phys = heap1_phys;
     proc_table[slot].stack_phys = stack_phys;
 
     TrapFrame *ctx = &proc_table[slot].ctx;
@@ -307,22 +309,21 @@ int sched_fork(TrapFrame *tf) {
 
     Process *parent = &proc_table[current_pid];
     u32 prog_phys = pmm_alloc_page();
-    u32 heap0_phys = pmm_alloc_page();
-    u32 heap1_phys = pmm_alloc_page();
     u32 stack_phys = pmm_alloc_page();
     pmm_copy_page(prog_phys, parent->prog_phys);
-    pmm_copy_page(heap0_phys, parent->heap0_phys);
-    pmm_copy_page(heap1_phys, parent->heap1_phys);
     pmm_copy_page(stack_phys, parent->stack_phys);
+    // mm_reset_heap + mm_fork_heap: mismo motivo que en sched_spawn (este
+    // slot puede venir de un proceso anterior), pero acá además hay que
+    // copiarle al hijo el heap que el padre ya hubiera tocado.
+    mm_reset_heap((u32)slot);
+    mm_fork_heap((u32)slot, (u32)current_pid);
     // Mismo comentario que en sched_spawn: fork siempre lo llama un
     // proceso corriendo (nunca el shell "desde afuera"), pero el shell
     // TAMPOCO usa TLB propio (kseg1), así que esto sigue siendo seguro.
-    mm_map_user((u32)slot, prog_phys, heap0_phys, heap1_phys, stack_phys);
+    mm_map_user((u32)slot, prog_phys, stack_phys);
 
     Process *child = &proc_table[slot];
     child->prog_phys = prog_phys;
-    child->heap0_phys = heap0_phys;
-    child->heap1_phys = heap1_phys;
     child->stack_phys = stack_phys;
     tf_copy(&child->ctx, tf); // mismos registros que el padre en este instante...
     child->ctx.v0 = 0;        // ...salvo el retorno de fork(): 0 en el hijo

@@ -47,28 +47,127 @@ void pmm_copy_page(u32 dst_phys, u32 src_phys) {
     }
 }
 
-static void tlb_write_pair(u32 index, u32 vaddr_even, u32 phys_even, u32 phys_odd) {
+static void tlb_write_pair(u32 index, u32 asid, u32 vaddr_even, u32 phys_even, u32 phys_odd) {
     cop0_write_index(index);
-    cop0_write_entryhi((vaddr_even & ~0x1FFFu) | (index % MAX_PROCS));
+    cop0_write_entryhi((vaddr_even & ~0x1FFFu) | asid);
     cop0_write_entrylo0(((phys_even >> 12) << 6) | (1u << 2) | (1u << 1)); // D=1,V=1
     cop0_write_entrylo1(((phys_odd >> 12) << 6) | (1u << 2) | (1u << 1));
     cop0_write_pagemask(0);
     cop0_tlbwi();
 }
 
-// Vaddr fija de todo proceso de usuario (USER_VADDR/USER_HEAP_VADDR/
-// USER_STACK_VADDR, kernel.h): como el TLB matchea por (vpn2,asid) y cada
-// proceso tiene su propio ASID, no hay colisión aunque todos compartan la
-// misma dirección. Dos entradas de TLB por proceso (cada una cubre un
-// VPN2 = 8KB, par+impar): la primera junta prog+heap0, la segunda
-// heap1+stack — así entra un heap real de 8KB sin que cada proceso
-// necesite más de 2 índices de TLB (con MAX_PROCS=4 son 8 de los 16 que
-// tiene el core, sobra margen). El índice de la 2da entrada se corre
-// MAX_PROCS lugares para no pisar la del slot de al lado; el ASID (bits
-// bajos de EntryHi, no el índice) es el mismo en ambas: por eso
-// tlb_write_pair calcula el ASID como `index % MAX_PROCS` en vez de
-// recibirlo aparte.
-void mm_map_user(u32 asid, u32 prog_phys, u32 heap0_phys, u32 heap1_phys, u32 stack_phys) {
-    tlb_write_pair(asid, USER_VADDR, prog_phys, heap0_phys);
-    tlb_write_pair(asid + MAX_PROCS, USER_HEAP_VADDR + 0x1000u, heap1_phys, stack_phys);
+// Arranca el TLB para demand paging: los primeros MAX_PROCS índices (uno
+// por slot de proceso, ver mm_map_user) quedan *wired* — tlbwr nunca los
+// toca — y el resto (MAX_PROCS..TLB_ENTRIES-1) queda libre para que
+// mm_handle_page_fault los reparta entre TODOS los procesos a medida que
+// van tocando su heap. Se llama una sola vez, al boot (ver kernel.c).
+void mm_init(void) {
+    cop0_write_wired(MAX_PROCS);
+}
+
+// Vaddr fija de todo proceso de usuario (USER_VADDR/USER_STACK_VADDR,
+// kernel.h): como el TLB matchea por (vpn2,asid) y cada proceso tiene su
+// propio ASID, no hay colisión aunque todos compartan la misma dirección.
+// Una sola entrada wired por proceso (índice == ASID == slot, fijo desde
+// que se crea): cubre texto (par) y stack (impar) del mismo VPN2. El heap
+// NO se mapea acá — es grande y con demanda de páginas, ver
+// mm_handle_page_fault más abajo.
+void mm_map_user(u32 asid, u32 prog_phys, u32 stack_phys) {
+    tlb_write_pair(asid, asid, USER_VADDR, prog_phys, stack_phys);
+}
+
+// ─────────────────────────── heap con demanda de páginas ───────────────
+// Tabla de páginas por proceso: sin esto, una página de heap que se cae
+// del TLB (tlbwr la reemplaza tarde o temprano — el rango no-wired lo
+// comparten TODOS los procesos) y se vuelve a tocar se confundiría con
+// "primera vez" y se pisaría con ceros, perdiendo lo que hubiera. Acá
+// queda la posta de qué física le corresponde a cada página virtual,
+// independiente de si en este momento hay o no una entrada de TLB
+// cacheándola.
+#define HEAP_PAGES (USER_HEAP_SIZE / PAGE_SIZE)
+static u32 heap_page_table[MAX_PROCS][HEAP_PAGES]; // 0 = todavía no tocada
+
+static u32 heap_page_index(u32 vaddr) {
+    return (vaddr - USER_HEAP_VADDR) / PAGE_SIZE;
+}
+
+// Física ya asignada a `vaddr` dentro del heap de `asid`, o la asigna
+// (página nueva, en cero) si es la primera vez que se toca.
+static u32 heap_page_get_or_alloc(u32 asid, u32 vaddr) {
+    u32 idx = heap_page_index(vaddr);
+    u32 phys = heap_page_table[asid][idx];
+    if (!phys) {
+        phys = pmm_alloc_page();
+        pmm_write_page(phys, 0, 0);
+        heap_page_table[asid][idx] = phys;
+    }
+    return phys;
+}
+
+// TLB refill/inválida en `badvaddr`: si cae dentro del heap del proceso
+// actual, le arma una entrada (posiblemente pisando la de otro proceso
+// que ya estaba usando ese índice — por eso el software, no el TLB, es la
+// fuente de verdad de qué física le toca a cada página) y devuelve 1 para
+// que kernel_trap reintente la instrucción que voló. 0 si `badvaddr` no
+// es del heap: ahí sí es un bug de verdad del proceso.
+int mm_handle_page_fault(u32 badvaddr) {
+    if (badvaddr < USER_HEAP_VADDR || badvaddr >= USER_HEAP_VADDR + USER_HEAP_SIZE) {
+        return 0;
+    }
+    u32 asid = (u32)sched_current_pid();
+    u32 vpn2_even = badvaddr & ~0x1FFFu;
+    u32 vpn2_odd = vpn2_even + PAGE_SIZE;
+
+    u32 even_phys = heap_page_get_or_alloc(asid, vpn2_even);
+    // La otra mitad del par (par/impar de 4KB) puede quedar fuera del
+    // heap si `badvaddr` cayó en la última página y el tamaño no es
+    // múltiplo de 8KB — no debería pasar con USER_HEAP_SIZE en MB, pero
+    // por las dudas no se sale del array.
+    u32 odd_phys = (vpn2_odd < USER_HEAP_VADDR + USER_HEAP_SIZE) ? heap_page_get_or_alloc(asid, vpn2_odd)
+                                                                   : even_phys;
+
+    cop0_write_entryhi(vpn2_even | asid);
+    cop0_write_entrylo0(((even_phys >> 12) << 6) | (1u << 2) | (1u << 1));
+    cop0_write_entrylo1(((odd_phys >> 12) << 6) | (1u << 2) | (1u << 1));
+    cop0_write_pagemask(0);
+    cop0_tlbwr(); // a un índice no-wired: puede pisar la entrada de heap de OTRO proceso, a propósito
+    return 1;
+}
+
+// La llaman sched_spawn/sched_fork antes de darle `asid` a un proceso
+// nuevo: sin esto, un slot reciclado (mismo ASID que un proceso ya
+// muerto) heredaría por accidente tanto la tabla de páginas como
+// cualquier entrada de TLB todavía viva de su antecesor — el nuevo dueño
+// terminaría leyendo memoria de otro proceso en vez de páginas limpias.
+void mm_reset_heap(u32 asid) {
+    for (u32 i = 0; i < HEAP_PAGES; i++) {
+        heap_page_table[asid][i] = 0;
+    }
+    for (u32 idx = MAX_PROCS; idx < TLB_ENTRIES; idx++) {
+        cop0_write_index(idx);
+        cop0_tlbr();
+        if ((cop0_read_entryhi() & 0xFFu) == asid) {
+            // ASID 0xFF: no lo usa ningún proceso real (MAX_PROCS<<0xFF),
+            // así que esta entrada no va a volver a matchear por las
+            // dudas de que algo la lea antes de que tlbwr la reemplace.
+            cop0_write_entryhi(0xFFu);
+            cop0_write_entrylo0(0);
+            cop0_write_entrylo1(0);
+            cop0_tlbwi();
+        }
+    }
+}
+
+// La llama sched_fork después de mm_reset_heap(child_asid): copia (física
+// de verdad, sin copy-on-write, mismo criterio que el resto del proyecto)
+// cada página de heap que el padre ya hubiera tocado.
+void mm_fork_heap(u32 child_asid, u32 parent_asid) {
+    for (u32 i = 0; i < HEAP_PAGES; i++) {
+        u32 parent_phys = heap_page_table[parent_asid][i];
+        if (parent_phys) {
+            u32 child_phys = pmm_alloc_page();
+            pmm_copy_page(child_phys, parent_phys);
+            heap_page_table[child_asid][i] = child_phys;
+        }
+    }
 }
