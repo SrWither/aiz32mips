@@ -137,6 +137,12 @@ void sem_init(int idx, int value);
 int sem_wait(TrapFrame *tf, int idx);    // devuelve 1 si bloqueó
 void sem_signal(int idx);
 
+// fs.c: filesystem plano sobre storage.h (montaje perezoso: recién toca el
+// device en el primer uso, ningún test que no lo use se ve afectado).
+int fs_create(const char *name, const u8 *data, u32 len); // 0 ok, -1 directorio lleno
+int fs_read(const char *name, u8 *buf, u32 maxlen);        // bytes leídos, -1 si no existe
+void fs_list(void);
+
 // kernel.c
 void kernel_main(void);
 void kpanic(TrapFrame *tf, const char *msg);

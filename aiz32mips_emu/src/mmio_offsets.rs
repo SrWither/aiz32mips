@@ -36,3 +36,15 @@ pub const KBD_MMIO_BASE: u32 = 0xA000_0000 + KBD_MMIO_PHYS; // 0xBF80_1000, kseg
 pub const REG_KBD_DATA: u32 = KBD_MMIO_BASE + 0x00; // u32, leer hace pop del FIFO (0 si está vacío)
 pub const REG_KBD_STATUS: u32 = KBD_MMIO_BASE + 0x04; // u32, bit0 = hay datos
 pub const REG_KBD_CTRL: u32 = KBD_MMIO_BASE + 0x08; // u8, bit0 = IRQ (Cause.IP2) habilitada
+
+// ───────────────────────────── Storage ──────────────────────────────────
+// Disco de bloques respaldado por un archivo real del host (ver
+// aiz32mips_core::devices::storage): lo que se escribe sobrevive a que se
+// cierre el emulador. Comandos síncronos, sin IRQ.
+pub const STORAGE_MMIO_PHYS: u32 = 0x1F80_3000;
+pub const STORAGE_MMIO_BASE: u32 = 0xA000_0000 + STORAGE_MMIO_PHYS; // 0xBF80_3000, kseg1
+
+pub const REG_STORAGE_BLOCK: u32 = STORAGE_MMIO_BASE + 0x00; // u32, número de bloque
+pub const REG_STORAGE_CMD: u32 = STORAGE_MMIO_BASE + 0x04; // u32, 1=leer bloque→buffer 2=escribir buffer→bloque
+pub const REG_STORAGE_STATUS: u32 = STORAGE_MMIO_BASE + 0x08; // u32, bit0 = error (bloque fuera de rango)
+pub const REG_STORAGE_BUF: u32 = STORAGE_MMIO_BASE + 0x200; // 512 bytes, legibles/escribibles como RAM

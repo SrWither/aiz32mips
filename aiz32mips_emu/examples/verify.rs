@@ -8,6 +8,7 @@ use aiz32mips_core::cop::CAUSE_IP2;
 use aiz32mips_core::cpu::CPU;
 use aiz32mips_core::devices::gpu::{self, GpuMmio};
 use aiz32mips_core::devices::keyboard::{self, KeyboardMmio};
+use aiz32mips_core::devices::storage::StorageMmio;
 use aiz32mips_core::devices::vram::{new_shared_vram, GpuVram};
 use aiz32mips_core::devices::ram::Ram;
 use aiz32mips_core::elf;
@@ -73,6 +74,14 @@ fn main() {
     bus.add_device(Box::new(vram_dev));
     bus.add_device(Box::new(gpu));
     bus.add_device(Box::new(KeyboardMmio::new(0x1F80_1000)));
+
+    // Storage respaldado por un archivo real (default: verify_disk.img en
+    // el cwd), configurable con DISK_IMG — permite probar persistencia
+    // real corriendo este binario dos veces con la misma ruta.
+    let disk_path = env::var("DISK_IMG").unwrap_or_else(|_| "verify_disk.img".to_string());
+    let storage = StorageMmio::new(0x1F80_3000, std::path::Path::new(&disk_path))
+        .expect("no pude abrir/crear el disco de DISK_IMG");
+    bus.add_device(Box::new(storage));
 
     // Inyección de teclado sintética para probar sin SDL:
     //   KBD_TEXT=abc      -> eventos de texto (kind=1), uno por char

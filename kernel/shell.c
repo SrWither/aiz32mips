@@ -4,7 +4,7 @@
 #include "kernel.h"
 #include "embedded.h"
 
-#define CMD_MAX 40
+#define CMD_MAX 120
 
 static char cmd_buf[CMD_MAX];
 static int cmd_len = 0;
@@ -15,6 +15,28 @@ static int str_eq(const char *a, const char *b) {
         b++;
     }
     return *a == *b;
+}
+
+static u32 str_len(const char *s) {
+    u32 n = 0;
+    while (s[n]) {
+        n++;
+    }
+    return n;
+}
+
+// Corta `s` en el primer espacio y devuelve lo que sigue ("" si no había
+// espacio). La usan los comandos con argumentos (write/cat) para separar
+// el nombre del resto de la línea.
+static char *split_first_space(char *s) {
+    while (*s && *s != ' ') {
+        s++;
+    }
+    if (*s == ' ') {
+        *s = 0;
+        return s + 1;
+    }
+    return s;
 }
 
 static void cmd_ping(void) {
@@ -43,9 +65,43 @@ static void cmd_pingpong(void) {
     }
 }
 
+// write <nombre> <texto>: crea (o pisa) un archivo con el resto de la
+// línea como contenido.
+static void cmd_write(char *rest) {
+    char *content = split_first_space(rest);
+    if (rest[0] == 0) {
+        console_puts("uso: write <nombre> <texto>\n");
+        return;
+    }
+    if (fs_create(rest, (const u8 *)content, str_len(content)) < 0) {
+        console_puts("no se pudo crear el archivo (¿directorio lleno?)\n");
+    }
+}
+
+// cat <nombre>: imprime el contenido de un archivo (hasta 512 bytes).
+static void cmd_cat(char *rest) {
+    if (rest[0] == 0) {
+        console_puts("uso: cat <nombre>\n");
+        return;
+    }
+    static u8 buf[512];
+    int n = fs_read(rest, buf, sizeof(buf));
+    if (n < 0) {
+        console_puts("no existe: ");
+        console_puts(rest);
+        console_putc('\n');
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        console_putc((char)buf[i]);
+    }
+    console_putc('\n');
+}
+
 static void shell_dispatch(void) {
     cmd_buf[cmd_len] = 0;
-    if (cmd_len == 0) {
+    char *rest = split_first_space(cmd_buf);
+    if (cmd_buf[0] == 0) {
         // linea vacia: no hace nada
     } else if (str_eq(cmd_buf, "ping")) {
         cmd_ping();
@@ -53,6 +109,12 @@ static void shell_dispatch(void) {
         cmd_run();
     } else if (str_eq(cmd_buf, "pingpong")) {
         cmd_pingpong();
+    } else if (str_eq(cmd_buf, "ls")) {
+        fs_list();
+    } else if (str_eq(cmd_buf, "write")) {
+        cmd_write(rest);
+    } else if (str_eq(cmd_buf, "cat")) {
+        cmd_cat(rest);
     } else {
         console_puts("comando desconocido: ");
         console_puts(cmd_buf);

@@ -9,6 +9,7 @@ use aiz32mips_core::cop::CAUSE_IP2;
 use aiz32mips_core::cpu::CPU;
 use aiz32mips_core::devices::gpu::{self, GpuMmio};
 use aiz32mips_core::devices::keyboard::KeyboardMmio;
+use aiz32mips_core::devices::storage::StorageMmio;
 use aiz32mips_core::devices::vram::{new_shared_vram, GpuVram};
 use aiz32mips_core::devices::ram::Ram;
 use aiz32mips_core::elf;
@@ -27,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
         eprintln!(
-            "Uso: {} <rom_path.bin|.elf> <font_rom.bin> <ciclos|inf>",
+            "Uso: {} <rom_path.bin|.elf> <font_rom.bin> <ciclos|inf> [disk_img]",
             args[0]
         );
         process::exit(1);
@@ -35,6 +36,7 @@ fn main() -> anyhow::Result<()> {
     let rom_path = &args[1];
     let font_rom_path = &args[2];
     let cycles_arg = &args[3];
+    let disk_img_path = args.get(4).map(String::as_str).unwrap_or("disk.img");
 
     // === imagen inicial de RAM/ROM ===
     // Soporta tanto un .bin plano (comportamiento de siempre: se copia
@@ -121,6 +123,13 @@ fn main() -> anyhow::Result<()> {
 
     // === teclado ===
     bus.add_device(Box::new(KeyboardMmio::new(KBD_MMIO_PHYS)));
+
+    // === storage ===
+    // Respaldado por un archivo real: lo que el kernel escriba sobrevive a
+    // que se cierre el emulador (ver aiz32mips_core::devices::storage).
+    let storage = StorageMmio::new(STORAGE_MMIO_PHYS, std::path::Path::new(disk_img_path))
+        .map_err(|e| anyhow::anyhow!("no pude abrir el disco '{}': {}", disk_img_path, e))?;
+    bus.add_device(Box::new(storage));
 
     // Config inicial: 320x200, framebuffer único (sin double buffer todavía)
     write16(&mut bus, REG_FB_WIDTH, 320);
