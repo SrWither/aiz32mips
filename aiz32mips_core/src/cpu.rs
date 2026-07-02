@@ -6,6 +6,63 @@ use crate::memory::*;
 use crate::registers::*;
 use crate::tlb::{Tlb, TlbEntry, TLB_ENTRIES};
 
+// ───────────────────────────── COP1 (FPU) ──────────────────────────────
+// Helpers de C.cond.fmt y CVT.W.fmt/TRUNC.W.fmt (ver Instruction::Cop1 en
+// execute()). Sin trampas de excepción de FP (Invalid/Overflow/etc.): este
+// emulador no las modela, así que el bit "signaling" (bit3 del funct de
+// C.cond) da el mismo resultado booleano que su par "quiet" — sólo cambia
+// si el hardware real levantaría una excepción con NaN, que acá no pasa.
+
+/// `cond` es el funct completo de una C.cond.fmt (0x30-0x3F); sólo importan
+/// sus 3 bits bajos, ver la nota de arriba.
+fn fp_compare(cond: u8, a: f64, b: f64) -> bool {
+    let unordered = a.is_nan() || b.is_nan();
+    match cond & 0x7 {
+        0 => false,                 // F / SF
+        1 => unordered,             // UN / NGLE
+        2 => !unordered && a == b,  // EQ / SEQ
+        3 => unordered || a == b,   // UEQ / NGL
+        4 => !unordered && a < b,   // OLT / LT
+        5 => unordered || a < b,    // ULT / NGE
+        6 => !unordered && a <= b,  // OLE / LE
+        7 => unordered || a <= b,   // ULE / NGT
+        _ => unreachable!(),
+    }
+}
+
+// Resultado "inválido" de una conversión a entero fuera de rango o NaN: el
+// valor que la spec de MIPS pide devolver (2^31 - 1) en vez de un wrap
+// silencioso — a `(v as i32)` de Rust ya satura distinto, así que hay que
+// hacerlo a mano.
+const FP_INVALID_W: u32 = 0x7FFF_FFFF;
+
+fn fp_out_of_w_range(v: f64) -> bool {
+    v.is_nan() || v >= 2147483648.0 || v < -2147483648.0
+}
+
+/// TRUNC.W.fmt: siempre trunca hacia cero (a diferencia de CVT.W.fmt, que
+/// depende del modo de redondeo de FCSR).
+fn fp_trunc_to_w(v: f64) -> u32 {
+    if fp_out_of_w_range(v) {
+        FP_INVALID_W
+    } else {
+        (v.trunc() as i32) as u32
+    }
+}
+
+/// CVT.W.fmt: redondea según FCSR.RM. Este proyecto nunca toca FCSR.RM
+/// (CTC1 existe pero nada lo usa) así que alcanza con el default de
+/// hardware, RM=0 (round-to-nearest) — `f64::round` no es bit-exacto en el
+/// desempate ("half away from zero" en vez de "half to even"), pero para
+/// el código que corre acá no hace diferencia observable.
+fn fp_round_to_w(v: f64) -> u32 {
+    if fp_out_of_w_range(v) {
+        FP_INVALID_W
+    } else {
+        (v.round() as i32) as u32
+    }
+}
+
 pub struct CPU {
     pub registers: Registers,
     pub cop0: Cop0,
@@ -30,15 +87,6 @@ impl CPU {
         };
         cpu.reset();
         cpu
-    }
-
-    #[inline]
-    fn set_fcc0(&mut self, cond: bool) {
-        if cond {
-            self.cop1.fcsr |= 1 << 23;
-        } else {
-            self.cop1.fcsr &= !(1 << 23);
-        }
     }
 
     #[inline]
@@ -764,21 +812,24 @@ impl CPU {
                         // ALU ops al final de este bloque.
                     }
                     0x31 => {
-                        // LWC1 (Load Word to Cop1)
+                        // LWC1 (Load Word to Cop1): el patrón de bits crudo
+                        // tal cual, sin pasar por f32->f64->bits (eso
+                        // corrompía cualquier single real — write_f/read_f
+                        // son para D, un roundtrip por f64 no preserva los
+                        // bits de un f32 que nunca fue un double).
                         let addr = rs_val.wrapping_add(imm_u);
                         if let Some(val) = self.mem_read32(bus, addr, instr_pc, in_delay_slot) {
-                            let f = f32::from_bits(val);
-                            self.cop1.write_f(i.rt as usize, f as f64);
+                            self.cop1.write_s_bits(i.rt as usize, val);
                             return val;
                         }
                         return 0;
                     }
 
                     0x39 => {
-                        // SWC1 (Store Word from Cop1)
+                        // SWC1 (Store Word from Cop1): idem, bits crudos.
                         let addr = rs_val.wrapping_add(imm_u);
-                        let fval = self.cop1.read_f(i.rt as usize) as f32;
-                        self.mem_write32(bus, addr, fval.to_bits(), instr_pc, in_delay_slot);
+                        let bits = self.cop1.read_s_bits(i.rt as usize);
+                        self.mem_write32(bus, addr, bits, instr_pc, in_delay_slot);
                         return 0;
                     }
 
@@ -1089,13 +1140,199 @@ impl CPU {
                 }
 
                 0x08 => {
-                    let tf = (fp.ft >> 0) & 0x1; // 0 = false, 1 = true (C.xxT vs C.xxF)
-                    let nd = (fp.ft >> 1) & 0x1; // 1 = likely (BC1TL/BC1FL)
+                    // BC1T/BC1F/BC1TL/BC1FL: salta según FCC0. El offset de
+                    // 16 bits estándar de un branch vive en fs:fd:funct acá
+                    // (Cop1Ins no tiene un campo `imm` propio — son los
+                    // mismos 16 bits bajos de la instrucción, ver
+                    // Cop1Ins::decode). El delay slot se ejecuta siempre,
+                    // salvo la variante "likely" (TL/FL) cuando NO se toma:
+                    // ahí se anula (ni se ejecuta) — mismo criterio que
+                    // usaría cualquier branch "likely" de MIPS32, aunque
+                    // BC1 es la única de esa familia que este core soporta.
+                    let tf = fp.ft & 0x1; // 0 = BC1F, 1 = BC1T
+                    let likely = ((fp.ft >> 1) & 0x1) == 1;
                     let cond = self.cop1.get_fcc0();
-
                     let take = if tf == 1 { cond } else { !cond };
-                    if take {
-                    } else if nd == 1 {
+
+                    let offset16 =
+                        (((fp.fs as u32) << 11) | ((fp.fd as u32) << 6) | (fp.funct as u32)) as u16;
+                    let offset = ((offset16 as i16 as i32) << 2) as u32;
+                    let pc_next = self.registers.get_pc(); // ya avanzado +4 por el fetch de ESTA instrucción
+
+                    if take || !likely {
+                        if let Some(v) = self.fetch(bus, instr_pc, true) {
+                            let d = self.decode(v);
+                            self.execute(bus, d, instr_pc, true);
+                        }
+                        if !self.exception_taken && take {
+                            self.registers.special.pc = pc_next.wrapping_add(offset);
+                        }
+                    } else {
+                        // likely + no tomado: delay slot anulado.
+                        self.registers.special.pc = pc_next.wrapping_add(4);
+                    }
+                    0
+                }
+
+                // ───── S (single, 0x10) / D (double, 0x11): aritmética real ─────
+                // Mismo funct para ambos formatos (ADD/SUB/MUL/DIV/SQRT/ABS/
+                // MOV/NEG/CVT/C.cond) — sólo cambia si se lee/escribe con
+                // read_s/write_s o read_d/write_d. Sin ROUND/CEIL/FLOOR.W,
+                // RECIP/RSQRT ni los MOVZ/MOVN/MOVCF de punto flotante:
+                // ningún binario de este proyecto los genera (clang -mips32
+                // con -O2 no los usa para el código C típico que corre acá),
+                // se agregan si alguna vez hace falta.
+                0x10 => {
+                    let fs = fp.fs as usize;
+                    let ft = fp.ft as usize;
+                    let fd = fp.fd as usize;
+                    match fp.funct {
+                        0x00 => {
+                            let r = self.cop1.read_s(fs) + self.cop1.read_s(ft);
+                            self.cop1.write_s(fd, r);
+                        }
+                        0x01 => {
+                            let r = self.cop1.read_s(fs) - self.cop1.read_s(ft);
+                            self.cop1.write_s(fd, r);
+                        }
+                        0x02 => {
+                            let r = self.cop1.read_s(fs) * self.cop1.read_s(ft);
+                            self.cop1.write_s(fd, r);
+                        }
+                        0x03 => {
+                            let r = self.cop1.read_s(fs) / self.cop1.read_s(ft);
+                            self.cop1.write_s(fd, r);
+                        }
+                        0x04 => {
+                            let r = self.cop1.read_s(fs).sqrt();
+                            self.cop1.write_s(fd, r);
+                        }
+                        0x05 => {
+                            let r = self.cop1.read_s(fs).abs();
+                            self.cop1.write_s(fd, r);
+                        }
+                        0x06 => {
+                            let r = self.cop1.read_s(fs);
+                            self.cop1.write_s(fd, r);
+                        }
+                        0x07 => {
+                            let r = -self.cop1.read_s(fs);
+                            self.cop1.write_s(fd, r);
+                        }
+                        0x0D => {
+                            // TRUNC.W.S
+                            let v = self.cop1.read_s(fs) as f64;
+                            self.cop1.write_s_bits(fd, fp_trunc_to_w(v));
+                        }
+                        0x21 => {
+                            // CVT.D.S
+                            let v = self.cop1.read_s(fs) as f64;
+                            self.cop1.write_d(fd, v);
+                        }
+                        0x24 => {
+                            // CVT.W.S
+                            let v = self.cop1.read_s(fs) as f64;
+                            self.cop1.write_s_bits(fd, fp_round_to_w(v));
+                        }
+                        f if (f & 0x30) == 0x30 => {
+                            // C.cond.S
+                            let a = self.cop1.read_s(fs) as f64;
+                            let b = self.cop1.read_s(ft) as f64;
+                            self.cop1.set_fcc0(fp_compare(f, a, b));
+                        }
+                        _ => {
+                            println!(
+                                "[COP1] S funct=0x{:02X} no implementado en PC={:#010X}",
+                                fp.funct, instr_pc
+                            );
+                        }
+                    }
+                    0
+                }
+                0x11 => {
+                    let fs = fp.fs as usize;
+                    let ft = fp.ft as usize;
+                    let fd = fp.fd as usize;
+                    match fp.funct {
+                        0x00 => {
+                            let r = self.cop1.read_d(fs) + self.cop1.read_d(ft);
+                            self.cop1.write_d(fd, r);
+                        }
+                        0x01 => {
+                            let r = self.cop1.read_d(fs) - self.cop1.read_d(ft);
+                            self.cop1.write_d(fd, r);
+                        }
+                        0x02 => {
+                            let r = self.cop1.read_d(fs) * self.cop1.read_d(ft);
+                            self.cop1.write_d(fd, r);
+                        }
+                        0x03 => {
+                            let r = self.cop1.read_d(fs) / self.cop1.read_d(ft);
+                            self.cop1.write_d(fd, r);
+                        }
+                        0x04 => {
+                            let r = self.cop1.read_d(fs).sqrt();
+                            self.cop1.write_d(fd, r);
+                        }
+                        0x05 => {
+                            let r = self.cop1.read_d(fs).abs();
+                            self.cop1.write_d(fd, r);
+                        }
+                        0x06 => {
+                            let r = self.cop1.read_d(fs);
+                            self.cop1.write_d(fd, r);
+                        }
+                        0x07 => {
+                            let r = -self.cop1.read_d(fs);
+                            self.cop1.write_d(fd, r);
+                        }
+                        0x0D => {
+                            // TRUNC.W.D
+                            let v = self.cop1.read_d(fs);
+                            self.cop1.write_s_bits(fd, fp_trunc_to_w(v));
+                        }
+                        0x20 => {
+                            // CVT.S.D
+                            let v = self.cop1.read_d(fs) as f32;
+                            self.cop1.write_s(fd, v);
+                        }
+                        0x24 => {
+                            // CVT.W.D
+                            let v = self.cop1.read_d(fs);
+                            self.cop1.write_s_bits(fd, fp_round_to_w(v));
+                        }
+                        f if (f & 0x30) == 0x30 => {
+                            // C.cond.D
+                            let a = self.cop1.read_d(fs);
+                            let b = self.cop1.read_d(ft);
+                            self.cop1.set_fcc0(fp_compare(f, a, b));
+                        }
+                        _ => {
+                            println!(
+                                "[COP1] D funct=0x{:02X} no implementado en PC={:#010X}",
+                                fp.funct, instr_pc
+                            );
+                        }
+                    }
+                    0
+                }
+                0x14 => {
+                    // W (word, entero crudo en la FPR): sólo tienen sentido
+                    // las conversiones DESDE entero (CVT.S.W/CVT.D.W) — el
+                    // resto de funct (aritmética "en formato W") no existe
+                    // en la spec real de MIPS tampoco.
+                    let fs = fp.fs as usize;
+                    let fd = fp.fd as usize;
+                    let iv = self.cop1.read_s_bits(fs) as i32;
+                    match fp.funct {
+                        0x20 => self.cop1.write_s(fd, iv as f32), // CVT.S.W
+                        0x21 => self.cop1.write_d(fd, iv as f64), // CVT.D.W
+                        _ => {
+                            println!(
+                                "[COP1] W funct=0x{:02X} no implementado en PC={:#010X}",
+                                fp.funct, instr_pc
+                            );
+                        }
                     }
                     0
                 }
