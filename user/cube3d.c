@@ -3,8 +3,12 @@
 // pinchando MMIO directo desde kernel/host): la única diferencia real es
 // el #include de abajo — gpu_user.h expone el mismo API pero mandando la
 // display list por syscall en vez de escribir VRAM directo (kuseg no
-// puede, ver gpu_user.h). Nunca sale del loop: cortalo con Ctrl+C.
+// puede, ver gpu_user.h). De yapa suena la melodía de Tetris de fondo (ver
+// tetris_music.h) — sirve como demo del device de audio nuevo. Nunca sale
+// del loop: cortalo con Ctrl+C (corta el cubo Y la música, ver
+// audio_release_if_owner en kernel/trap.c).
 #include "gpu_user.h"
+#include "tetris_music.h"
 
 #define W 320
 #define H 200
@@ -61,6 +65,7 @@ void _start(void) {
         gpu_flip();
         gpu_end();
 
+        music_tick_frame(); // ver tetris_music.h
         gpu_wait_vblank();
         ax += 1;
         ay += 2;
