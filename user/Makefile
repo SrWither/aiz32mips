@@ -9,7 +9,7 @@ ELF_FMT   = elf32-little
 CFLAGS  = -target $(ARCH) -mips32 -ffreestanding -fno-pic -fno-builtin \
           -fomit-frame-pointer -G0 -O2 -nostdlib -static -Wall
 
-PROGRAMS = hello ping pingpong cube3d filetest memtest sigtest
+PROGRAMS = hello ping pingpong cube3d filetest memtest sigtest fopentst
 
 all: $(PROGRAMS:%=%.bin)
 

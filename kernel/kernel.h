@@ -224,6 +224,7 @@ int fs_is_dir(const char *path);                     // 1/0/-1 (no existe), para
 int fs_open(const char *path, int write_mode, int owner_pid);
 int fs_fd_read(int fd, u8 *buf, u32 maxlen);
 int fs_fd_write(int fd, const u8 *buf, u32 len);
+int fs_fd_seek(int fd, i32 offset, int whence); // sólo fds de lectura, ver fs.c
 int fs_fd_close(int fd);
 void fs_close_all_owned_by(int pid); // la llaman sched_exit_current/sched_kill_pid
 

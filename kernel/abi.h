@@ -36,6 +36,15 @@
 #define SIGINT 2
 #define NSIG 8 // tope de sched.c::Process.sig_handler; deja lugar para crecer
 
+// Mueve el cursor de lectura de un fd ya abierto (ver kernel/fs.c::
+// fs_fd_seek): sólo para fds de lectura, los de escritura son un buffer de
+// acumulación sin noción de posición (ver fs_fd_write/unistd.h).
+#define SYS_LSEEK 16
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
 static inline void sys_putc(char c) {
     register unsigned int r4 __asm__("$4") = (unsigned int)(unsigned char)c;
     register unsigned int r2 __asm__("$2") = SYS_PUTC;
@@ -149,6 +158,17 @@ static inline int sys_close(int fd) {
     register unsigned int r4 __asm__("$4") = (unsigned int)fd;
     register unsigned int r2 __asm__("$2") = SYS_CLOSE;
     __asm__ volatile("syscall" : "+r"(r2) : "r"(r4) : "memory");
+    return (int)r2;
+}
+
+// whence: SEEK_SET/SEEK_CUR/SEEK_END. Devuelve la nueva posición o -1 (fd
+// de escritura, o resultado fuera de [0, tamaño del archivo]).
+static inline int sys_lseek(int fd, int offset, int whence) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)fd;
+    register unsigned int r5 __asm__("$5") = (unsigned int)offset;
+    register unsigned int r6 __asm__("$6") = (unsigned int)whence;
+    register unsigned int r2 __asm__("$2") = SYS_LSEEK;
+    __asm__ volatile("syscall" : "+r"(r2) : "r"(r4), "r"(r5), "r"(r6) : "memory");
     return (int)r2;
 }
 

@@ -35,4 +35,10 @@ static inline int close(int fd) {
     return sys_close(fd);
 }
 
+// Sólo para fds abiertos con O_RDONLY (ver sys_lseek/fs_fd_seek): un
+// O_WRONLY es un buffer de acumulación sin posición real.
+static inline int lseek(int fd, int offset, int whence) {
+    return sys_lseek(fd, offset, whence);
+}
+
 #endif // AIZ_LIBC_UNISTD_H

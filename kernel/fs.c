@@ -710,6 +710,39 @@ int fs_fd_write(int fd, const u8 *buf, u32 len) {
     return (int)n;
 }
 
+// whence: 0=SEEK_SET, 1=SEEK_CUR, 2=SEEK_END. Sólo fds de lectura: los de
+// escritura son un buffer de acumulación sin "posición" real (ver
+// fs_fd_write) — igual que el resto de la escritura en este proyecto
+// (bump allocator sin free, ver el comentario de scope en sched.c), no
+// hace falta más que eso todavía.
+int fs_fd_seek(int fd, i32 offset, int whence) {
+    int idx = fd - FD_BASE;
+    if (idx < 0 || idx >= MAX_OPEN_FILES || !open_files[idx].used || open_files[idx].writing) {
+        return -1;
+    }
+    OpenFile *f = &open_files[idx];
+    u32 base;
+    switch (whence) {
+        case 0:
+            base = 0;
+            break;
+        case 1:
+            base = f->offset;
+            break;
+        case 2:
+            base = f->size;
+            break;
+        default:
+            return -1;
+    }
+    i32 new_off = (i32)base + offset;
+    if (new_off < 0 || (u32)new_off > f->size) {
+        return -1;
+    }
+    f->offset = (u32)new_off;
+    return (int)f->offset;
+}
+
 int fs_fd_close(int fd) {
     int idx = fd - FD_BASE;
     if (idx < 0 || idx >= MAX_OPEN_FILES || !open_files[idx].used) {

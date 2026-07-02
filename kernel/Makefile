@@ -52,6 +52,7 @@ disk.img: FORCE diskroot/home/readme.txt
 	mcopy -i disk.img ../user/filetest.elf ::/bin/filetest.elf
 	mcopy -i disk.img ../user/memtest.elf ::/bin/memtest.elf
 	mcopy -i disk.img ../user/sigtest.elf ::/bin/sigtest.elf
+	mcopy -i disk.img ../user/fopentst.elf ::/bin/fopentst.elf
 	mcopy -i disk.img diskroot/home/readme.txt ::/home/readme.txt
 	@echo "disk.img"
 

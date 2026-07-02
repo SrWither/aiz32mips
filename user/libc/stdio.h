@@ -1,9 +1,8 @@
-// stdio.h — E/S mínima. La consola es el único "archivo" que hay por
-// ahora: no existe syscall de FS para userland todavía (fs.c lo usa la
-// shell directo desde contexto kernel, ver kernel/shell.c) — eso llega
-// cuando haga falta abrir archivos desde un programa de usuario, no antes.
-// getchar no bloquea (ver sys_getc en abi.h): devuelve -1 si no hay tecla
-// lista, no espera a que la haya.
+// stdio.h — E/S mínima: consola (sys_putc/sys_getc, sin buffering) +
+// FILE* sobre las syscalls de archivo de fd crudo (SYS_OPEN/READ/WRITE/
+// CLOSE/LSEEK, ver kernel/fs.c y libc/unistd.h para la versión sin
+// envoltorio). getchar no bloquea (ver sys_getc en abi.h): devuelve -1 si
+// no hay tecla lista, no espera a que la haya.
 #ifndef AIZ_LIBC_STDIO_H
 #define AIZ_LIBC_STDIO_H
 
@@ -17,6 +16,94 @@ typedef int i32;
 
 #include "../../kernel/abi.h"
 #include <stdarg.h>
+
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
+#define EOF (-1)
+
+// FILE: envoltorio de un fd (ver kernel/fs.c) + flags de estado. Nada de
+// buffering propio (cada fread/fwrite es un syscall directo) — este
+// proyecto no tiene stdio bufferizado todavía, alcanza para lo que se
+// necesita (WAD de DOOM, tests de FS).
+typedef struct {
+    int fd;
+    int eof;
+    int error;
+} FILE;
+
+// Pool estático en vez de malloc: fopen no debería depender de que el heap
+// (stdlib.h) esté inicializado. fd==0 marca un slot libre (FD_BASE=3 en
+// fs.c, así que 0 nunca es un fd real).
+#define FOPEN_MAX 8
+static FILE _file_pool[FOPEN_MAX];
+
+// mode: sólo importa el primer caracter, 'w' es escritura (crea/trunca,
+// ver fs_open/fs_fd_close), cualquier otra cosa ('r', "rb", etc.) es
+// lectura. Sin modo "append" ni "r+" — mismo alcance que sys_open.
+static inline FILE *fopen(const char *path, const char *mode) {
+    int write_mode = (mode[0] == 'w') ? 1 : 0;
+    int fd = sys_open(path, write_mode);
+    if (fd < 0) {
+        return NULL;
+    }
+    for (int i = 0; i < FOPEN_MAX; i++) {
+        if (_file_pool[i].fd == 0) {
+            _file_pool[i].fd = fd;
+            _file_pool[i].eof = 0;
+            _file_pool[i].error = 0;
+            return &_file_pool[i];
+        }
+    }
+    sys_close(fd); // sin slot libre en el pool: no dejar el fd huérfano
+    return NULL;
+}
+
+static inline u32 fread(void *ptr, u32 size, u32 nmemb, FILE *f) {
+    u32 total = size * nmemb;
+    int n = sys_read(f->fd, ptr, total);
+    if (n < 0) {
+        f->error = 1;
+        return 0;
+    }
+    if ((u32)n < total) {
+        f->eof = 1; // simplificado: no distingue "llegué justo al final" de "pedí de más"
+    }
+    return size ? (u32)n / size : 0;
+}
+
+static inline u32 fwrite(const void *ptr, u32 size, u32 nmemb, FILE *f) {
+    u32 total = size * nmemb;
+    int n = sys_write(f->fd, ptr, total);
+    if (n < 0) {
+        f->error = 1;
+        return 0;
+    }
+    return size ? (u32)n / size : 0;
+}
+
+static inline int fseek(FILE *f, int offset, int whence) {
+    return sys_lseek(f->fd, offset, whence) < 0 ? -1 : 0;
+}
+
+static inline int ftell(FILE *f) {
+    return sys_lseek(f->fd, 0, SEEK_CUR);
+}
+
+static inline int feof(FILE *f) {
+    return f->eof;
+}
+
+static inline int ferror(FILE *f) {
+    return f->error;
+}
+
+static inline int fclose(FILE *f) {
+    int r = sys_close(f->fd);
+    f->fd = 0; // libera el slot del pool
+    return r;
+}
 
 static inline int putchar(int c) {
     sys_putc((char)c);

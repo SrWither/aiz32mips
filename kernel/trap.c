@@ -89,6 +89,9 @@ static void handle_syscall(TrapFrame *tf) {
         case SYS_CLOSE:
             tf->v0 = (u32)fs_fd_close((int)tf->a0);
             break;
+        case SYS_LSEEK:
+            tf->v0 = (u32)fs_fd_seek((int)tf->a0, (i32)tf->a1, (int)tf->a2);
+            break;
         case SYS_SIGNAL:
             tf->v0 = sched_set_sig_handler(sched_current_pid(), (int)tf->a0, tf->a1, tf->a2);
             break;
