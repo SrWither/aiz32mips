@@ -80,6 +80,7 @@ disk.img: FORCE diskroot/home/readme.txt
 	mcopy -i disk.img ../user/build/elf/audiotst.elf ::/bin/audiotst.elf
 	mcopy -i disk.img ../user/build/elf/bigtest.elf ::/bin/bigtest.elf
 	mcopy -i disk.img ../user/build/elf/libctest.elf ::/bin/libctest.elf
+	mcopy -i disk.img ../user/build/elf/waittest.elf ::/bin/waittest.elf
 	mcopy -i disk.img diskroot/home/readme.txt ::/home/readme.txt
 	@echo "disk.img"
 

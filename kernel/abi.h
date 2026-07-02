@@ -52,6 +52,12 @@
 #define SYS_AUDIO_SUBMIT 17
 #define SYS_AUDIO_STATUS 18
 
+// Bloquea hasta que el proceso `pid` termine (por cualquier vía). Sin
+// jerarquía de padre/hijo real (fork() tampoco la registra): es "esperame
+// a este pid puntual", no "esperame a cualquiera de mis hijos" como el
+// wait() real de POSIX. Ver kernel/sched.c::sched_wait_for.
+#define SYS_WAIT 19
+
 static inline void sys_putc(char c) {
     register unsigned int r4 __asm__("$4") = (unsigned int)(unsigned char)c;
     register unsigned int r2 __asm__("$2") = SYS_PUTC;
@@ -228,6 +234,16 @@ static inline void sys_sigreturn(void) {
     __asm__ volatile("syscall" : : "r"(r2) : "memory");
     for (;;) {
     }
+}
+
+// Devuelve `pid` una vez que termina, o -1 si `pid` no existe (ya había
+// terminado, o nunca existió — sin estado de "zombie" que consultar
+// retroactivamente).
+static inline int sys_wait(int pid) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)pid;
+    register unsigned int r2 __asm__("$2") = SYS_WAIT;
+    __asm__ volatile("syscall" : "+r"(r2) : "r"(r4) : "memory");
+    return (int)r2;
 }
 
 #endif // AIZ_ABI_H

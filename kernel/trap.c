@@ -97,6 +97,11 @@ static void handle_syscall(TrapFrame *tf) {
             // con el pid del hijo, o -1 si no había slot.
             tf->v0 = (u32)sched_fork(tf);
             break;
+        case SYS_WAIT:
+            if (sched_wait_for(tf, (int)tf->a0)) {
+                return; // se bloqueó: tf ya es de otro proceso
+            }
+            break; // no bloqueó (tf->v0 ya en -1, ver sched_wait_for): epc+=4 de abajo
         case SYS_OPEN:
             // tf->a0 es un puntero kuseg del proceso (path): se puede leer
             // directo, mismo motivo que en SYS_GPU_SUBMIT (ver abi.h).
@@ -227,14 +232,18 @@ void keyboard_irq(TrapFrame *tf) {
                 // al proceso en foreground (sched_signal_fg necesita tf: si
                 // ESE proceso es justo el que este mismo IRQ interrumpió,
                 // hay que redirigir su estado en vivo, no el guardado en
-                // proc_table). shell_input((char)3) queda solo para la
-                // parte visual (echo "^C" + reset del prompt).
+                // proc_table). was_waiting se captura ANTES del kill: una
+                // vez que sched_signal_fg mata al proceso (acción default),
+                // shell_on_process_exit ya limpió fg_wait_pid — shell_ctrl_c
+                // necesita saber si HABÍA algo en foreground, no si sigue
+                // habiendo, para no imprimir el prompt dos veces.
+                int was_waiting = shell_is_waiting_fg();
                 int killed_pid = sched_signal_fg(tf, SIGINT);
                 if (killed_pid > 0) {
                     gpu_release_if_owner(killed_pid);
                     audio_release_if_owner(killed_pid);
                 }
-                shell_input((char)3);
+                shell_ctrl_c(was_waiting);
             } else if (keycode == 'l' && (ev & KBD_MOD_CTRL)) {
                 // Ctrl+L: mismo motivo que Ctrl+C arriba (SDL no lo manda
                 // como TextInput) — acá no hace falta tocar el scheduler,

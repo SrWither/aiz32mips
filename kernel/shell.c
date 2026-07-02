@@ -33,6 +33,42 @@ static int hist_count = 0;
 static int hist_nav = -1;
 static char hist_draft[CMD_MAX];
 
+// ────────────────── comando en foreground (wait) ────────────────────────
+// 0 = la shell acepta entrada normalmente. Si no, es el pid que se
+// spawneó en foreground y todavía no terminó — la shell deja de aceptar
+// comandos nuevos (ver shell_input) hasta que sched.c avise que terminó
+// (shell_on_process_exit, llamada desde sched_notify_exit en sched.c cada
+// vez que CUALQUIER proceso muere). Ver el comentario de shell_spawn_fg
+// para por qué esto NO usa el bloqueo de scheduler (sched_block_current).
+static int fg_wait_pid = 0;
+
+int shell_is_waiting_fg(void) {
+    return fg_wait_pid != 0;
+}
+
+void shell_on_process_exit(int pid) {
+    if (pid != 0 && pid == fg_wait_pid) {
+        fg_wait_pid = 0;
+        console_puts("> ");
+        console_flush();
+    }
+}
+
+// Ctrl+C mató (por acción default) al proceso que la shell tenía en
+// foreground: shell_on_process_exit ya se encargó (o se va a encargar, si
+// tenía un handler instalado y sigue vivo, más adelante) de mostrar el
+// próximo prompt — acá sólo falta el eco visual "^C". Si NO había nada en
+// foreground, este Ctrl+C es el de siempre: cancela lo que hubiera
+// tipeado a medias.
+void shell_ctrl_c(int was_fg_waiting) {
+    console_puts("^C\n");
+    if (!was_fg_waiting) {
+        cmd_len = 0;
+        hist_nav = -1;
+        console_puts("> ");
+    }
+}
+
 static int str_eq(const char *a, const char *b) {
     while (*a && *a == *b) {
         a++;
@@ -253,13 +289,44 @@ static u32 parse_arg0(const char *s) {
     return v;
 }
 
-// run <cmd> [arg0]: mismo resolutor que un comando suelto (path con '/' o
-// búsqueda en $PATH) — no bloquea: sched_spawn solo registra el proceso,
-// el scheduler lo hace correr desde el próximo tick del timer.
-static void cmd_run(char *rest) {
+// Spawnea `path` y, si !background, deja a la shell "esperando" a que
+// termine antes de mostrar el próximo prompt (ver fg_wait_pid/
+// shell_on_process_exit más abajo) — a propósito NO usa sched_wait_for
+// (el bloqueo de scheduler que sí usa SYS_WAIT): sched_wait_for asume que
+// sched_current_pid() es quien llama, algo que sólo vale para una syscall
+// real (siempre la dispara el proceso que la ejecuta). Un IRQ de teclado
+// puede llegar mientras CUALQUIER otro proceso es el "current" (el
+// teclado le llega a la shell sin importar quién tenga la CPU en ese
+// momento, ver keyboard_irq en trap.c) — bloquear ahí con sched_wait_for
+// corrompería el estado de scheduling de quien sea que estuviera
+// corriendo. Por eso la shell usa esta bandera simple en cambio: no toca
+// el scheduler para nada, sólo dejar de aceptar entrada nueva hasta que
+// sched.c avise que `pid` terminó.
+// Devuelve 1 si quedó esperando (no hay que imprimir "> " todavía), 0 si
+// ya terminó del todo (error de spawn, o corre en segundo plano).
+static int shell_spawn_fg(const char *path, u32 arg0, int background) {
+    int pid = sched_spawn(path, arg0);
+    if (pid < 0) {
+        console_puts("no se pudo ejecutar: ");
+        console_puts(path);
+        console_putc('\n');
+        return 0;
+    }
+    if (!background) {
+        fg_wait_pid = pid;
+        return 1;
+    }
+    return 0;
+}
+
+// run <cmd> [arg0] [&]: mismo resolutor que un comando suelto (path con
+// '/' o búsqueda en $PATH). `background` ya viene decidido por
+// shell_dispatch (el '&' se despoja de la línea completa antes de
+// separar comando/args, no sólo acá).
+static int cmd_run(char *rest, int background) {
     if (rest[0] == 0) {
-        console_puts("uso: run <comando> [arg0]\n");
-        return;
+        console_puts("uso: run <comando> [arg0] [&]\n");
+        return 0;
     }
     char *arg = split_first_space(rest);
     char path[PATH_MAX];
@@ -267,13 +334,9 @@ static void cmd_run(char *rest) {
         console_puts("no encontrado: ");
         console_puts(rest);
         console_putc('\n');
-        return;
+        return 0;
     }
-    if (sched_spawn(path, parse_arg0(arg)) < 0) {
-        console_puts("no se pudo ejecutar: ");
-        console_puts(path);
-        console_putc('\n');
-    }
+    return shell_spawn_fg(path, parse_arg0(arg), background);
 }
 
 // cat <path>: imprime el contenido de un archivo (hasta 512 bytes).
@@ -474,8 +537,8 @@ static void shell_replace_line(const char *new_content) {
 }
 
 void shell_history_up(void) {
-    if (hist_count == 0) {
-        return;
+    if (fg_wait_pid != 0 || hist_count == 0) {
+        return; // hay un comando en foreground: no tiene sentido navegar
     }
     if (hist_nav == -1) {
         // primera flecha arriba de esta línea: guarda el borrador para
@@ -492,8 +555,8 @@ void shell_history_up(void) {
 }
 
 void shell_history_down(void) {
-    if (hist_nav == -1) {
-        return; // no se está navegando: Down no hace nada
+    if (fg_wait_pid != 0 || hist_nav == -1) {
+        return; // idem shell_history_up
     }
     hist_nav++;
     if (hist_nav >= hist_count) {
@@ -504,16 +567,41 @@ void shell_history_down(void) {
     }
 }
 
-static void shell_dispatch(void) {
+// Devuelve 1 si ya dejó a la shell esperando un proceso en foreground (no
+// hay que imprimir "> " de nuevo, ver shell_input) — 0 en cualquier otro
+// caso (builtin, línea vacía, error, o spawn en segundo plano).
+static int shell_dispatch(void) {
     cmd_buf[cmd_len] = 0;
     hist_add(cmd_buf);
     hist_save();
     hist_nav = -1; // el próximo Up arranca de nuevo desde el más nuevo
+
+    // "cmd &" al final == correr en segundo plano (no bloquea la shell,
+    // el comportamiento de siempre). Sin soporte de comillas/escapes: un
+    // '&' en cualquier otro lugar de la línea (p.ej. un argumento) no se
+    // interpreta especial, sólo el último carácter no-espacio de TODA la
+    // línea, antes de separar comando/args — por eso este chequeo va acá
+    // arriba, no adentro de cmd_run/resolve_exec.
+    int background = 0;
+    int end = cmd_len;
+    while (end > 0 && cmd_buf[end - 1] == ' ') {
+        end--;
+    }
+    if (end > 0 && cmd_buf[end - 1] == '&') {
+        background = 1;
+        end--;
+        while (end > 0 && cmd_buf[end - 1] == ' ') {
+            end--;
+        }
+        cmd_buf[end] = 0;
+    }
+
     char *rest = split_first_space(cmd_buf);
+    int blocked = 0;
     if (cmd_buf[0] == 0) {
         // linea vacia: no hace nada
     } else if (str_eq(cmd_buf, "run")) {
-        cmd_run(rest);
+        blocked = cmd_run(rest, background);
     } else if (str_eq(cmd_buf, "ls")) {
         char path[PATH_MAX];
         resolve_path(path, sizeof(path), rest);
@@ -540,11 +628,7 @@ static void shell_dispatch(void) {
         // "hello" corre igual que antes "run hello".
         char path[PATH_MAX];
         if (resolve_exec(path, sizeof(path), cmd_buf) == 0) {
-            if (sched_spawn(path, parse_arg0(rest)) < 0) {
-                console_puts("no se pudo ejecutar: ");
-                console_puts(path);
-                console_putc('\n');
-            }
+            blocked = shell_spawn_fg(path, parse_arg0(rest), background);
         } else {
             console_puts("comando desconocido: ");
             console_puts(cmd_buf);
@@ -552,22 +636,23 @@ static void shell_dispatch(void) {
         }
     }
     cmd_len = 0;
+    return blocked;
 }
 
 void shell_init(void) {
     cmd_len = 0;
+    fg_wait_pid = 0;
     env_set("PATH", "/bin");
     hist_load();
 }
 
 void shell_input(char c) {
-    if (c == 3) { // Ctrl+C (ETX): la señal ya se entregó en trap.c::keyboard_irq
-                   // (sched_signal_fg necesita el tf del IRQ, acá sólo llega
-                   // el byte) — esto es nada más la parte visual del prompt.
-        console_puts("^C\n");
-        cmd_len = 0; // lo que hubiera tipeado a medias, se descarta
-        hist_nav = -1;
-        console_puts("> ");
+    if (fg_wait_pid != 0) {
+        // Hay un comando en foreground: no se acepta entrada nueva hasta
+        // que termine (shell_on_process_exit se encarga de retomar el
+        // prompt). Ctrl+C YA NO pasa por acá (ver shell_ctrl_c/trap.c) —
+        // sched_signal_fg ya le llega directo al proceso en foreground
+        // sin pasar por shell_input.
         return;
     }
     if (c == 12) { // Ctrl+L (FF): limpia pantalla y redibuja el prompt con
@@ -581,8 +666,9 @@ void shell_input(char c) {
     }
     if (c == '\n' || c == '\r') {
         console_putc('\n');
-        shell_dispatch();
-        console_puts("> ");
+        if (!shell_dispatch()) {
+            console_puts("> ");
+        }
         return;
     }
     if (c == 8 || c == 127) { // backspace/delete

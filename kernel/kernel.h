@@ -154,6 +154,18 @@ void shell_input(char c);
 // trap.c::keyboard_irq).
 void shell_history_up(void);
 void shell_history_down(void);
+// Ctrl+C: separado de shell_input (no pasa por su switch de `char c`)
+// porque trap.c necesita capturar "¿la shell estaba esperando algo en
+// foreground?" ANTES de que sched_signal_fg mate (o no) a ese proceso —
+// después de eso ya es tarde para saberlo (ver el comentario en shell.c).
+void shell_ctrl_c(int was_fg_waiting);
+// 1 si la shell tiene un comando en foreground bloqueando el prompt (ver
+// fg_wait_pid en shell.c) — la usa trap.c antes de procesar Ctrl+C.
+int shell_is_waiting_fg(void);
+// La llama sched.c (sched_notify_exit) cada vez que CUALQUIER proceso
+// termina (salida normal, señal, excepción): si es el que la shell tenía
+// en foreground, retoma el prompt.
+void shell_on_process_exit(int pid);
 
 // Layout de vaddr de todo proceso de usuario (mm.c y sched.c lo comparten:
 // un solo lugar para no desincronizar dónde arranca el programa, a qué
@@ -221,6 +233,7 @@ void sched_block_current(TrapFrame *tf); // duerme al actual (sem_wait)
 void sched_wake(int pid);                // lo despierta (sem_signal)
 int sched_spawn(const char *path, u32 arg0); // lee+parsea el ELF de disco; slot o -1
 int sched_fork(TrapFrame *tf); // duplica al proceso actual; pid del hijo (o -1) para el padre
+int sched_wait_for(TrapFrame *tf, int pid); // SYS_WAIT: bloquea al actual hasta que `pid` termine (sólo válido desde syscall de un proceso de usuario, ver el comentario en sched.c)
 void sched_exit_current(TrapFrame *tf);      // usan SYS_EXIT y el kill por fallo
 void sched_kill_pid(TrapFrame *tf, int pid); // termina un pid puntual (acción default de una señal)
 

@@ -41,4 +41,12 @@ static inline int lseek(int fd, int offset, int whence) {
     return sys_lseek(fd, offset, whence);
 }
 
+// wait(pid): bloquea hasta que el proceso `pid` (típicamente un hijo de
+// fork(), aunque no hay jerarquía real que lo exija) termine. Devuelve
+// `pid` si terminó, -1 si no existía o ya había terminado antes de esta
+// llamada.
+static inline int wait(int pid) {
+    return sys_wait(pid);
+}
+
 #endif // AIZ_LIBC_UNISTD_H

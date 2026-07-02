@@ -58,6 +58,23 @@ typedef struct {
     u32 sig_trampoline;
     u32 sig_in_handler;
     TrapFrame sig_saved_ctx;
+    // SYS_WAIT (ver sched_wait_for/sched_notify_exit): pid bloqueado
+    // esperando a que ESTE proceso termine, o 0 si nadie lo espera. Sólo
+    // para esperas de verdad vía syscall (un proceso de usuario
+    // esperando a un hijo de fork()) — la shell usa un mecanismo
+    // separado (fg_wait_pid en shell.c) porque un IRQ de teclado puede
+    // llegar mientras cualquier OTRO proceso es el "current", así que no
+    // se puede asumir que sched_current_pid() es la shell (ver el
+    // comentario de sched_notify_exit).
+    int waiter_pid;
+    // 1 si este pid terminó SIN que nadie lo estuviera esperando todavía
+    // (ver sched_notify_exit) — un hijo chico puede terminar antes de que
+    // el padre llegue a llamar wait() (un timer tick puede colarse justo
+    // entre fork() y wait() y dejarlo correr primero), y sin esto ese
+    // wait() posterior encontraría el slot ya PROC_UNUSED y devolvería -1
+    // aunque el pid sí existió y terminó bien. Se limpia al reusar el
+    // slot (spawn/fork) o al consultarlo una vez (sched_wait_for).
+    int exited_unclaimed;
 } Process;
 
 static Process proc_table[MAX_PROCS];
@@ -160,6 +177,29 @@ void sched_wake(int pid) {
     }
 }
 
+// La llaman sched_exit_current/sched_kill_pid cada vez que `pid` deja de
+// existir, sin importar cómo (salida normal, señal por default, excepción):
+// despierta a quien lo esperaba con SYS_WAIT (si había alguien) y avisa a
+// la shell por si lo tenía en foreground. shell_on_process_exit vive en
+// shell.c, no acá, a propósito: sched.c no necesita saber CÓMO la shell
+// decide mostrar su próximo prompt, sólo que "este pid terminó" es un
+// evento que le interesa.
+static void sched_notify_exit(int pid) {
+    int waiter = proc_table[pid].waiter_pid;
+    if (waiter) {
+        proc_table[pid].waiter_pid = 0;
+        proc_table[waiter].ctx.v0 = (u32)pid; // sys_wait devuelve el pid que terminó
+        sched_wake(waiter);
+    } else {
+        // Nadie esperando TODAVÍA: se marca para que un sys_wait
+        // POSTERIOR (ver sched_wait_for) lo resuelva sin bloquear, en vez
+        // de ver el slot ya UNUSED y devolver -1 como si el pid nunca
+        // hubiera existido.
+        proc_table[pid].exited_unclaimed = 1;
+    }
+    shell_on_process_exit(pid);
+}
+
 // Termina un pid puntual (acción default de una señal sin handler
 // instalado, ver sched_signal_fg) sin tocar a los demás procesos, sin
 // importar su estado (corriendo, listo o bloqueado en un semáforo — un
@@ -175,6 +215,7 @@ void sched_kill_pid(TrapFrame *tf, int pid) {
     if (pid == current_pid) {
         sched_switch_to(tf, sched_pick_next());
     }
+    sched_notify_exit(pid);
 }
 
 // Ctrl+C desde el shell (trap.c::keyboard_irq): a diferencia del viejo
@@ -246,9 +287,47 @@ void sched_sigreturn(TrapFrame *tf, int pid) {
 
 void sched_exit_current(TrapFrame *tf) {
     fs_close_all_owned_by(current_pid);
+    int exiting = current_pid;
     // Sin guardar ctx: este proceso no vuelve, no tiene sentido.
     proc_table[current_pid].state = PROC_UNUSED;
     sched_switch_to(tf, sched_pick_next());
+    sched_notify_exit(exiting);
+}
+
+// SYS_WAIT: bloquea al proceso actual hasta que `pid` termine, sin
+// importar cómo. A diferencia del wait() real de POSIX, no hay jerarquía
+// de padre/hijo acá (fork() tampoco la registra) — es más un "esperame a
+// este pid puntual" que un "esperame a cualquiera de mis hijos". Sólo
+// para llamadas de un PROCESO DE USUARIO vía syscall real: acá
+// sched_current_pid() SÍ es confiable (un syscall siempre lo dispara el
+// proceso que lo ejecutó), a diferencia de un IRQ de teclado que puede
+// interrumpir a cualquiera — por eso la shell NO usa esta función para
+// esperar sus propios comandos (ver fg_wait_pid/shell_on_process_exit en
+// shell.c, mecanismo separado a propósito). Devuelve 1 si bloqueó (tf ya
+// es de otro proceso), 0 si no había nada que esperar (pid inválido,
+// el propio pid, o ya no existe) — ahí tf->v0 queda en -1.
+int sched_wait_for(TrapFrame *tf, int pid) {
+    if (pid <= 0 || pid >= MAX_PROCS || pid == current_pid) {
+        tf->v0 = (u32)-1;
+        return 0;
+    }
+    if (proc_table[pid].state == PROC_UNUSED) {
+        // Ya no existe: puede que nunca haya existido, o que haya
+        // terminado antes de que llegáramos acá (ver exited_unclaimed/
+        // sched_notify_exit) — en ese segundo caso sí hay algo que
+        // devolver, sin bloquear.
+        if (proc_table[pid].exited_unclaimed) {
+            proc_table[pid].exited_unclaimed = 0;
+            tf->v0 = (u32)pid;
+        } else {
+            tf->v0 = (u32)-1;
+        }
+        return 0;
+    }
+    proc_table[pid].waiter_pid = current_pid;
+    tf->epc += 4; // no reejecutar el syscall cuando lo despierten (mismo motivo que sem_wait)
+    sched_block_current(tf);
+    return 1;
 }
 
 // ─────────────────────── carga de ELF32/MIPS desde disco ──────────────────
@@ -427,6 +506,16 @@ int sched_spawn(const char *path, u32 arg0) {
     }
     proc_table[slot].sig_trampoline = 0;
     proc_table[slot].sig_in_handler = 0;
+    // waiter_pid a 0: si este slot lo tuvo otro proceso antes y alguien
+    // se había quedado esperándolo (SYS_WAIT), ese waiter ya recibió su
+    // notificación cuando el ocupante anterior murió (sched_notify_exit)
+    // — un slot recién reusado no puede tener un waiter de verdad todavía.
+    proc_table[slot].waiter_pid = 0;
+    // exited_unclaimed a 0: si quedó en 1 porque nadie reclamó la salida
+    // del ocupante ANTERIOR de este slot, no puede seguir valiendo para
+    // el proceso NUEVO — si no, un sys_wait sobre este pid devolvería
+    // "ya terminó" antes de que el proceso nuevo haga nada.
+    proc_table[slot].exited_unclaimed = 0;
 
     proc_table[slot].state = PROC_READY;
     // Este es el nuevo "foreground": Ctrl+C apunta al último comando que se
@@ -523,6 +612,8 @@ int sched_fork(TrapFrame *tf) {
     }
     child->sig_trampoline = 0;
     child->sig_in_handler = 0;
+    child->waiter_pid = 0; // mismo motivo que en sched_spawn
+    child->exited_unclaimed = 0; // idem
     child->state = PROC_READY;
 
     return slot; // el padre recibe el pid del hijo (lo pisa trap.c en tf->v0)
