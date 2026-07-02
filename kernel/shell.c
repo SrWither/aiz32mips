@@ -11,6 +11,28 @@ static int cmd_len = 0;
 
 static char cwd[PATH_MAX] = "/";
 
+// ─────────────────────────── historial de comandos ─────────────────────
+// Array chico y plano (no ring buffer): con HIST_MAX=32 entradas de hasta
+// CMD_MAX bytes cada una, "correr todo un lugar" al llenarse (hist_add)
+// es un memmove de unos pocos KB — insignificante al ritmo en que se
+// escriben comandos, y mucho más simple de razonar que aritmética modular
+// de ring buffer. Se persiste entero en /home/.history: fs_write no tiene
+// modo "append" (crea/trunca, ver fs.c), así que cada comando nuevo
+// reescribe el archivo completo (hist_save) — de nuevo, insignificante a
+// este tamaño.
+#define HIST_MAX 32
+#define HIST_FILE "/home/.history"
+static char hist[HIST_MAX][CMD_MAX];
+static int hist_count = 0;
+
+// Estado de navegación (flechas arriba/abajo): -1 = no se está navegando
+// (cmd_buf es lo que el usuario está tipeando de verdad). 0..hist_count-1
+// = índice del comando de hist[] que se está mostrando ahora mismo
+// (0=más vieja, hist_count-1=más nueva). hist_draft guarda lo que había
+// tipeado antes de arrancar a navegar, para poder volver con Down.
+static int hist_nav = -1;
+static char hist_draft[CMD_MAX];
+
 static int str_eq(const char *a, const char *b) {
     while (*a && *a == *b) {
         a++;
@@ -372,8 +394,121 @@ static void cmd_env(void) {
     }
 }
 
+// Reescribe /home/.history entero a partir de hist[] (sin modo "append" en
+// fs_write, ver el comentario de HIST_MAX más arriba).
+static void hist_save(void) {
+    static char buf[HIST_MAX * CMD_MAX]; // static: no CMD_MAX*32 en el stack del IRQ
+    u32 len = 0;
+    for (int i = 0; i < hist_count; i++) {
+        for (const char *p = hist[i]; *p && len < sizeof(buf) - 1; p++) {
+            buf[len++] = *p;
+        }
+        if (len < sizeof(buf) - 1) {
+            buf[len++] = '\n';
+        }
+    }
+    fs_write(HIST_FILE, (const u8 *)buf, len);
+}
+
+// Agrega `line` al historial: no guarda líneas vacías ni una igual a la
+// última que ya estaba (mismo criterio que HISTCONTROL=ignoredups de
+// bash — repetir Enter en la misma línea no debería inflar la historia).
+// Al llenarse HIST_MAX, tira la más vieja corriendo todo un lugar.
+static void hist_add(const char *line) {
+    if (!line[0]) {
+        return;
+    }
+    if (hist_count > 0 && str_eq(hist[hist_count - 1], line)) {
+        return;
+    }
+    if (hist_count == HIST_MAX) {
+        for (int i = 1; i < HIST_MAX; i++) {
+            str_copy(hist[i - 1], hist[i], CMD_MAX);
+        }
+        hist_count--;
+    }
+    str_copy(hist[hist_count], line, CMD_MAX);
+    hist_count++;
+}
+
+// La llama shell_init: carga /home/.history línea por línea (si existe —
+// fs_read devuelve <0 si no, hist_load no hace nada, arranca vacío) para
+// que el historial sobreviva a un reinicio.
+static void hist_load(void) {
+    static u8 buf[HIST_MAX * CMD_MAX];
+    int n = fs_read(HIST_FILE, buf, sizeof(buf));
+    if (n <= 0) {
+        return;
+    }
+    int start = 0;
+    for (int i = 0; i < n; i++) {
+        if (buf[i] == '\n') {
+            int len = i - start;
+            if (len > 0 && len < CMD_MAX) {
+                char line[CMD_MAX];
+                for (int k = 0; k < len; k++) {
+                    line[k] = (char)buf[start + k];
+                }
+                line[len] = 0;
+                hist_add(line);
+            }
+            start = i + 1;
+        }
+    }
+}
+
+// Borra visualmente lo que hay tipeado ahora mismo (backspace por cada
+// carácter, mismo mecanismo que ya usa el backspace normal) y lo
+// reemplaza por `new_content` — la usan shell_history_up/down para
+// mostrar el comando de la historia sin tocar cmd_len a mano en cada
+// lugar.
+static void shell_replace_line(const char *new_content) {
+    while (cmd_len > 0) {
+        console_putc(8);
+        cmd_len--;
+    }
+    for (int i = 0; new_content[i] && cmd_len < CMD_MAX - 1; i++) {
+        cmd_buf[cmd_len++] = new_content[i];
+        console_putc(new_content[i]);
+    }
+}
+
+void shell_history_up(void) {
+    if (hist_count == 0) {
+        return;
+    }
+    if (hist_nav == -1) {
+        // primera flecha arriba de esta línea: guarda el borrador para
+        // poder volver a él con Down, y arranca desde el más nuevo.
+        cmd_buf[cmd_len] = 0;
+        str_copy(hist_draft, cmd_buf, CMD_MAX);
+        hist_nav = hist_count - 1;
+    } else if (hist_nav > 0) {
+        hist_nav--;
+    } else {
+        return; // ya está en el más viejo
+    }
+    shell_replace_line(hist[hist_nav]);
+}
+
+void shell_history_down(void) {
+    if (hist_nav == -1) {
+        return; // no se está navegando: Down no hace nada
+    }
+    hist_nav++;
+    if (hist_nav >= hist_count) {
+        hist_nav = -1;
+        shell_replace_line(hist_draft);
+    } else {
+        shell_replace_line(hist[hist_nav]);
+    }
+}
+
 static void shell_dispatch(void) {
     cmd_buf[cmd_len] = 0;
+    hist_add(cmd_buf);
+    hist_save();
+    hist_nav = -1; // el próximo Up arranca de nuevo desde el más nuevo
     char *rest = split_first_space(cmd_buf);
     if (cmd_buf[0] == 0) {
         // linea vacia: no hace nada
@@ -422,6 +557,7 @@ static void shell_dispatch(void) {
 void shell_init(void) {
     cmd_len = 0;
     env_set("PATH", "/bin");
+    hist_load();
 }
 
 void shell_input(char c) {
@@ -430,7 +566,17 @@ void shell_input(char c) {
                    // el byte) — esto es nada más la parte visual del prompt.
         console_puts("^C\n");
         cmd_len = 0; // lo que hubiera tipeado a medias, se descarta
+        hist_nav = -1;
         console_puts("> ");
+        return;
+    }
+    if (c == 12) { // Ctrl+L (FF): limpia pantalla y redibuja el prompt con
+                    // lo que hubiera tipeado (a diferencia de Ctrl+C, NO
+                    // se descarta la línea a medias).
+        cmd_buf[cmd_len] = 0;
+        console_clear();
+        console_puts("> ");
+        console_puts(cmd_buf);
         return;
     }
     if (c == '\n' || c == '\r') {
@@ -444,6 +590,7 @@ void shell_input(char c) {
             cmd_len--;
             console_putc(8); // console.c borra la ultima celda y retrocede
         }
+        hist_nav = -1; // editar la línea la desengancha de la historia
         return;
     }
     if (c < 32 || c > 126) {
@@ -453,4 +600,5 @@ void shell_input(char c) {
         cmd_buf[cmd_len++] = c;
         console_putc(c);
     }
+    hist_nav = -1; // idem backspace: tipear algo nuevo desengancha de la historia
 }

@@ -92,6 +92,18 @@ fn main() {
     //                        verdad (evento crudo, keycode 'c' + MOD_CTRL,
     //                        ver kernel/trap.c::keyboard_irq) en vez de
     //                        mandarse como texto.
+    //   KBD_TEXT=$'\x0c'  -> \x0c (FF) se traduce a Ctrl+L (keycode 'l' +
+    //                        MOD_CTRL, ver keyboard_irq) — limpia la
+    //                        pantalla del shell (ver shell.c).
+    //   KBD_TEXT=$'\x0b'/$'\x0e' -> \x0b (VT) / \x0e (SO) se traducen a un
+    //                        evento crudo de flecha arriba/abajo (KC_UP/
+    //                        KC_DOWN, "pressed"), para probar la
+    //                        navegación de historial del shell (ver
+    //                        shell_history_up/down). Elegidos porque no
+    //                        colisionan con nada más de este esquema de
+    //                        inyección — no representan nada en el
+    //                        keyboard.rs real (ahí las flechas llegan como
+    //                        evento crudo de SDL, no como texto).
     //   KBD_TEXT_AT="500000:sigtest\x03" -> igual que KBD_TEXT, pero recién
     //                        se empuja al FIFO cuando el contador de ciclos
     //                        llega a 500000, no al arrancar. keyboard_irq
@@ -106,6 +118,12 @@ fn main() {
         for b in text.bytes() {
             if b == 3 {
                 kbd.push_event(keyboard::EVT_PRESSED | keyboard::MOD_CTRL | (b'c' as u32));
+            } else if b == 0x0c {
+                kbd.push_event(keyboard::EVT_PRESSED | keyboard::MOD_CTRL | (b'l' as u32));
+            } else if b == 0x0b {
+                kbd.push_event(keyboard::EVT_PRESSED | keyboard::KC_UP as u32);
+            } else if b == 0x0e {
+                kbd.push_event(keyboard::EVT_PRESSED | keyboard::KC_DOWN as u32);
             } else {
                 kbd.push_event(keyboard::EVT_KIND_TEXT | b as u32);
             }

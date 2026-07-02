@@ -217,6 +217,10 @@ void keyboard_irq(TrapFrame *tf) {
             u32 keycode = ev & 0xFF;
             if (keycode == 8 || keycode == 13) {
                 shell_input((char)keycode);
+            } else if (keycode == KBD_KC_UP) {
+                shell_history_up();
+            } else if (keycode == KBD_KC_DOWN) {
+                shell_history_down();
             } else if (keycode == 'c' && (ev & KBD_MOD_CTRL)) {
                 // Ctrl+C: SDL no lo manda como TextInput (los combos con
                 // Ctrl quedan fuera de esa traducción). Se entrega SIGINT
@@ -231,6 +235,11 @@ void keyboard_irq(TrapFrame *tf) {
                     audio_release_if_owner(killed_pid);
                 }
                 shell_input((char)3);
+            } else if (keycode == 'l' && (ev & KBD_MOD_CTRL)) {
+                // Ctrl+L: mismo motivo que Ctrl+C arriba (SDL no lo manda
+                // como TextInput) — acá no hace falta tocar el scheduler,
+                // es puramente visual (ver el case c==12 en shell.c).
+                shell_input((char)12);
             }
         }
     }

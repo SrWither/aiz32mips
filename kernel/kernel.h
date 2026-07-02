@@ -148,6 +148,12 @@ void audio_release_if_owner(int pid);
 // shell.c
 void shell_init(void);
 void shell_input(char c);
+// Navegación de historial (flechas arriba/abajo, ver keyboard.h::
+// KBD_KC_UP/KBD_KC_DOWN): separadas de shell_input porque no tienen
+// equivalente ASCII — llegan como evento de tecla cruda, no de texto (ver
+// trap.c::keyboard_irq).
+void shell_history_up(void);
+void shell_history_down(void);
 
 // Layout de vaddr de todo proceso de usuario (mm.c y sched.c lo comparten:
 // un solo lugar para no desincronizar dónde arranca el programa, a qué
