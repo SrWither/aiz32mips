@@ -28,8 +28,14 @@ static void gfx_release(void) {
     console_clear();
 }
 
-void gpu_force_release(void) {
-    gfx_release();
+// La usa sched.c (sched_signal_fg) cuando la acción default de una señal
+// termina un proceso puntual: a diferencia del viejo gpu_force_release
+// (que la devolvía sí o sí, pensado para cuando Ctrl+C mataba TODOS los
+// procesos), esta sólo libera si el que se mató era justo el dueño.
+void gpu_release_if_owner(int pid) {
+    if (pid == gfx_owner_pid) {
+        gfx_release();
+    }
 }
 
 static void handle_syscall(TrapFrame *tf) {
@@ -83,6 +89,12 @@ static void handle_syscall(TrapFrame *tf) {
         case SYS_CLOSE:
             tf->v0 = (u32)fs_fd_close((int)tf->a0);
             break;
+        case SYS_SIGNAL:
+            tf->v0 = sched_set_sig_handler(sched_current_pid(), (int)tf->a0, tf->a1, tf->a2);
+            break;
+        case SYS_SIGRETURN:
+            sched_sigreturn(tf, sched_current_pid());
+            return; // sin el epc+=4 de abajo: ya restaura el epc pre-señal tal cual (igual que SYS_EXIT)
         case SYS_GPU_INIT:
             // A partir de acá el proceso es dueño de la pantalla (ver
             // gfx_owner_pid arriba): apaga el texto, que a partir de ahora
@@ -141,7 +153,7 @@ void timer_tick(TrapFrame *tf) {
     sched_tick(tf); // preemption: round-robin en cada tick
 }
 
-void keyboard_irq(void) {
+void keyboard_irq(TrapFrame *tf) {
     while (kbd_has_event()) {
         u32 ev = kbd_read_event();
         if (ev & KBD_EVT_KIND_TEXT) {
@@ -154,8 +166,16 @@ void keyboard_irq(void) {
                 shell_input((char)keycode);
             } else if (keycode == 'c' && (ev & KBD_MOD_CTRL)) {
                 // Ctrl+C: SDL no lo manda como TextInput (los combos con
-                // Ctrl quedan fuera de esa traducción), así que se arma acá
-                // el byte ASCII de ETX (3) que shell_input sabe interpretar.
+                // Ctrl quedan fuera de esa traducción). Se entrega SIGINT
+                // al proceso en foreground (sched_signal_fg necesita tf: si
+                // ESE proceso es justo el que este mismo IRQ interrumpió,
+                // hay que redirigir su estado en vivo, no el guardado en
+                // proc_table). shell_input((char)3) queda solo para la
+                // parte visual (echo "^C" + reset del prompt).
+                int killed_pid = sched_signal_fg(tf, SIGINT);
+                if (killed_pid > 0) {
+                    gpu_release_if_owner(killed_pid);
+                }
                 shell_input((char)3);
             }
         }
@@ -168,7 +188,7 @@ static void handle_interrupt(TrapFrame *tf) {
         timer_tick(tf);
     }
     if (tf->cause & CAUSE_IP2) {
-        keyboard_irq();
+        keyboard_irq(tf);
     }
 }
 

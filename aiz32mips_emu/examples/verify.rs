@@ -85,14 +85,38 @@ fn main() {
 
     // Inyección de teclado sintética para probar sin SDL:
     //   KBD_TEXT=abc      -> eventos de texto (kind=1), uno por char
+    //   KBD_TEXT=$'a\x03b' -> el \x03 (ETX) se traduce a un Ctrl+C de
+    //                        verdad (evento crudo, keycode 'c' + MOD_CTRL,
+    //                        ver kernel/trap.c::keyboard_irq) en vez de
+    //                        mandarse como texto.
+    //   KBD_TEXT_AT="500000:sigtest\x03" -> igual que KBD_TEXT, pero recién
+    //                        se empuja al FIFO cuando el contador de ciclos
+    //                        llega a 500000, no al arrancar. keyboard_irq
+    //                        vacía TODO el FIFO en cada IRQ (no hay reloj
+    //                        real acá), así que sin este delay un Ctrl+C
+    //                        puesto junto con el comando en KBD_TEXT se
+    //                        procesa ANTES de que el proceso llegue a
+    //                        instalar su handler — hace falta separarlo en
+    //                        el tiempo de verdad (medido en ciclos de CPU).
     //   KBD_HOLD=RIGHT    -> un evento de tecla cruda "pressed" (sin release)
-    if let Ok(text) = env::var("KBD_TEXT") {
-        if let Some(kbd) = bus.device_mut::<KeyboardMmio>() {
-            for b in text.bytes() {
+    fn push_kbd_text(kbd: &mut KeyboardMmio, text: &str) {
+        for b in text.bytes() {
+            if b == 3 {
+                kbd.push_event(keyboard::EVT_PRESSED | keyboard::MOD_CTRL | (b'c' as u32));
+            } else {
                 kbd.push_event(keyboard::EVT_KIND_TEXT | b as u32);
             }
         }
     }
+    if let Ok(text) = env::var("KBD_TEXT") {
+        if let Some(kbd) = bus.device_mut::<KeyboardMmio>() {
+            push_kbd_text(kbd, &text);
+        }
+    }
+    let delayed_injection: Option<(u64, String)> = env::var("KBD_TEXT_AT").ok().and_then(|s| {
+        let (cycle_str, text) = s.split_once(':')?;
+        Some((cycle_str.parse().ok()?, text.to_string()))
+    });
     if let Ok(key) = env::var("KBD_HOLD") {
         let kc = match key.as_str() {
             "UP" => keyboard::KC_UP,
@@ -115,6 +139,13 @@ fn main() {
     for i in 0..cycles {
         if trace && i < 200 {
             println!("[{i}] PC={:#010X}", cpu.registers.get_pc());
+        }
+        if let Some((at, text)) = &delayed_injection {
+            if i == *at {
+                if let Some(kbd) = bus.device_mut::<KeyboardMmio>() {
+                    push_kbd_text(kbd, text);
+                }
+            }
         }
         // Igual que hace main.rs en el emulador real: reflejar el IRQ
         // pendiente del device en Cause.IP2 antes de cada step.

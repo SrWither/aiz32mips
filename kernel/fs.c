@@ -724,7 +724,7 @@ int fs_fd_close(int fd) {
     return r;
 }
 
-// La llaman sched_exit_current/sched_kill_all_user: sin esto, un proceso
+// La llaman sched_exit_current/sched_kill_pid: sin esto, un proceso
 // que muere con un archivo abierto para escribir pierde lo que tenía en
 // el buffer (nunca llega al fs_write de close), y el slot de la tabla
 // queda ocupado para siempre.

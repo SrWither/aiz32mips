@@ -27,6 +27,14 @@
 #define SYS_READ 11
 #define SYS_WRITE 12
 #define SYS_CLOSE 13
+// Señales: sólo SIGINT existe hoy (Ctrl+C, ver kernel/trap.c::keyboard_irq
+// + kernel/sched.c::sched_signal_fg). Numeración estilo POSIX para que sea
+// familiar, aunque acá no hay ni remotamente el resto del set.
+#define SYS_SIGNAL 14
+#define SYS_SIGRETURN 15
+
+#define SIGINT 2
+#define NSIG 8 // tope de sched.c::Process.sig_handler; deja lugar para crecer
 
 static inline void sys_putc(char c) {
     register unsigned int r4 __asm__("$4") = (unsigned int)(unsigned char)c;
@@ -142,6 +150,38 @@ static inline int sys_close(int fd) {
     register unsigned int r2 __asm__("$2") = SYS_CLOSE;
     __asm__ volatile("syscall" : "+r"(r2) : "r"(r4) : "memory");
     return (int)r2;
+}
+
+typedef void (*sighandler_t)(int);
+
+#define SIG_DFL ((sighandler_t)0)  // acción por default: termina el proceso
+#define SIG_IGN ((sighandler_t)1)  // ignora la señal
+#define SIG_ERR ((sighandler_t)-1) // sys_signal: signum inválido
+
+// Instala `handler` para `signum` (SIG_DFL/SIG_IGN o una función propia,
+// ver user/libc/signal.h) y devuelve el handler anterior (o SIG_ERR si
+// signum es inválido). `trampoline` es la dirección de retorno que arma el
+// kernel en el TrapFrame antes de saltar al handler: cuando este vuelve
+// (jr $ra) cae ahí, y ese código sólo tiene que hacer sys_sigreturn() — ver
+// user/libc/signal.h::_sig_trampoline. Sin esto el kernel no tendría forma
+// de saber a qué dirección de USUARIO volver.
+static inline sighandler_t sys_signal(int signum, sighandler_t handler, unsigned int trampoline) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)signum;
+    register unsigned int r5 __asm__("$5") = (unsigned int)handler;
+    register unsigned int r6 __asm__("$6") = trampoline;
+    register unsigned int r2 __asm__("$2") = SYS_SIGNAL;
+    __asm__ volatile("syscall" : "+r"(r2) : "r"(r4), "r"(r5), "r"(r6) : "memory");
+    return (sighandler_t)r2;
+}
+
+// La llama _sig_trampoline (user/libc/signal.h) al volver de un handler: el
+// kernel restaura el TrapFrame completo previo a la señal y no vuelve nunca
+// a quien la invocó (mismo motivo que sys_exit: no hay "después" acá).
+static inline void sys_sigreturn(void) {
+    register unsigned int r2 __asm__("$2") = SYS_SIGRETURN;
+    __asm__ volatile("syscall" : : "r"(r2) : "memory");
+    for (;;) {
+    }
 }
 
 #endif // AIZ_ABI_H

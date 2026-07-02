@@ -421,9 +421,9 @@ void shell_init(void) {
 }
 
 void shell_input(char c) {
-    if (c == 3) { // Ctrl+C (ETX, ver trap.c::keyboard_irq): corta lo que esté corriendo
-        sched_kill_all_user();
-        gpu_force_release(); // por si el que se cortó era dueño de la pantalla (ver trap.c)
+    if (c == 3) { // Ctrl+C (ETX): la señal ya se entregó en trap.c::keyboard_irq
+                   // (sched_signal_fg necesita el tf del IRQ, acá sólo llega
+                   // el byte) — esto es nada más la parte visual del prompt.
         console_puts("^C\n");
         cmd_len = 0; // lo que hubiera tipeado a medias, se descarta
         console_puts("> ");

@@ -23,10 +23,31 @@ typedef struct {
     // al hijo. El heap NO vive acá: es de mm.c (mm_fork_heap), tiene su
     // propia tabla de páginas por ASID.
     u32 prog_phys, stack_phys;
+    // Señales (ver sched_signal_fg/sched_set_sig_handler/sched_sigreturn):
+    // sig_handler[n] es SIG_DFL(0)/SIG_IGN(1)/una dirección de handler de
+    // usuario para la señal n. sig_trampoline es la dirección (fija, la
+    // misma para todas las señales de este proceso) a la que el handler
+    // vuelve — la instala sys_signal, ver user/libc/signal.h. sig_in_handler
+    // evita anidar: mientras está en 1, una nueva entrega de la misma señal
+    // no hace nada (v1, sin cola de señales). sig_saved_ctx es el TrapFrame
+    // completo de justo antes de saltar al handler, para que sys_sigreturn
+    // lo restaure tal cual.
+    u32 sig_handler[NSIG];
+    u32 sig_trampoline;
+    u32 sig_in_handler;
+    TrapFrame sig_saved_ctx;
 } Process;
 
 static Process proc_table[MAX_PROCS];
 static int current_pid;
+
+// El último pid que arrancó sched_spawn: no hay job control de verdad (los
+// procesos ya corren todos async por round-robin, ver el comentario de
+// keyboard_irq en trap.c), así que "el proceso en foreground" para Ctrl+C
+// es simplemente el último comando que tipeaste — igual que una shell
+// simple sin `fg`/`bg`. 0 = ninguno (apunta al shell mismo, que no es un
+// slot matable).
+static int fg_pid;
 
 // El ASID del proceso elegido: exception_entry (boot.S) lo escribe en
 // EntryHi recién en su última instrucción antes del eret, no acá. Si se
@@ -84,11 +105,13 @@ static void sched_switch_to(TrapFrame *tf, int next) {
 // qué estado le queda al que se va.
 static void sched_save_and_switch(TrapFrame *tf, proc_state_t leave_state) {
     tf_copy(&proc_table[current_pid].ctx, tf);
-    // Si current_pid ya quedó UNUSED (sched_kill_all_user lo mató desde
-    // keyboard_irq mientras JUSTO era el proceso corriendo, ver Ctrl+C en
-    // shell.c) no lo resucitamos a READY acá: sin este chequeo, el
-    // siguiente tick de timer revivía un proceso ya matado — por eso
-    // "correr cube3d de nuevo" terminaba con dos instancias vivas.
+    // Chequeo defensivo: si current_pid ya quedó UNUSED no lo resucitamos a
+    // READY acá. sched_kill_pid/sched_exit_current fuerzan un context
+    // switch inmediato cuando matan al proceso corriendo, así que hoy este
+    // caso no debería darse — pero sin el chequeo, si algún camino futuro
+    // marcara UNUSED sin cambiar de contexto, el siguiente tick revivía un
+    // proceso ya muerto (así se manifestó originalmente: "correr cube3d de
+    // nuevo" terminaba con dos instancias vivas).
     if (proc_table[current_pid].state != PROC_UNUSED) {
         proc_table[current_pid].state = leave_state;
     }
@@ -115,22 +138,88 @@ void sched_wake(int pid) {
     }
 }
 
-// Ctrl+C desde el shell (trap.c::keyboard_irq): mata todo lo que no sea el
-// slot 0 (shell/kernel), sin importar su estado (corriendo, listo o
-// bloqueado en un semáforo — un pingpong colgado en sys_sem_wait se saca
-// así). No hay "proceso en foreground": es un botón de pánico simple, no
-// selectivo. El slot que estuviera activo en este mismo instante (si el
-// tick del teclado interrumpió a un proceso de usuario en vez de al
-// shell) corre una última vez hasta el próximo tick del timer, que ya lo
-// va a encontrar UNUSED y lo va a sacar de la rotación — no hace falta
-// forzar un context switch acá mismo.
-void sched_kill_all_user(void) {
-    for (int i = 1; i < MAX_PROCS; i++) {
-        if (proc_table[i].state != PROC_UNUSED) {
-            fs_close_all_owned_by(i); // si tenía un archivo abierto para escribir, lo vuelca antes de perderlo
-        }
-        proc_table[i].state = PROC_UNUSED;
+// Termina un pid puntual (acción default de una señal sin handler
+// instalado, ver sched_signal_fg) sin tocar a los demás procesos, sin
+// importar su estado (corriendo, listo o bloqueado en un semáforo — un
+// pingpong colgado en sys_sem_wait se saca así, igual que antes). Si el pid
+// es el que está corriendo ahora mismo, fuerza el cambio de contexto con tf
+// en vez de dejarlo correr una última vez hasta el próximo tick.
+void sched_kill_pid(TrapFrame *tf, int pid) {
+    if (proc_table[pid].state == PROC_UNUSED) {
+        return;
     }
+    fs_close_all_owned_by(pid); // si tenía un archivo abierto para escribir, lo vuelca antes de perderlo
+    proc_table[pid].state = PROC_UNUSED;
+    if (pid == current_pid) {
+        sched_switch_to(tf, sched_pick_next());
+    }
+}
+
+// Ctrl+C desde el shell (trap.c::keyboard_irq): a diferencia del viejo
+// "matar todo lo que no sea el shell", esto entrega SIGINT solo al proceso
+// en foreground (fg_pid). Si no instaló un handler con sys_signal, la
+// acción default es la de siempre (sched_kill_pid); si instaló uno, se lo
+// redirige ahí en vez de matarlo. Devuelve el pid que se mató por acción
+// default (para que trap.c libere la GPU si era el dueño), o 0 si no pasó
+// nada (sin foreground, señal ignorada, o redirigida a un handler).
+int sched_signal_fg(TrapFrame *tf, int signum) {
+    int pid = fg_pid;
+    if (pid == 0 || proc_table[pid].state == PROC_UNUSED) {
+        return 0;
+    }
+    u32 handler = proc_table[pid].sig_handler[signum];
+    if (handler == (u32)SIG_IGN) {
+        return 0;
+    }
+    if (handler == (u32)SIG_DFL) {
+        sched_kill_pid(tf, pid);
+        return pid;
+    }
+    if (proc_table[pid].sig_in_handler) {
+        return 0; // ya está atendiendo esta misma señal: no se anida (v1, sin cola)
+    }
+    // Bloqueado en un semáforo: sacarlo de ahí para que el scheduler lo
+    // corra y llegue a ejecutar el handler (si no, se queda esperando un
+    // sem_signal que puede no llegar nunca mientras el handler espera).
+    if (proc_table[pid].state == PROC_BLOCKED) {
+        proc_table[pid].state = PROC_READY;
+    }
+    // Si pid es el que está corriendo ahora mismo, su estado en vivo es tf
+    // (todavía no se volcó a proc_table[pid].ctx); si no, ya está guardado
+    // ahí desde el último context switch.
+    TrapFrame *target = (pid == current_pid) ? tf : &proc_table[pid].ctx;
+    tf_copy(&proc_table[pid].sig_saved_ctx, target);
+    proc_table[pid].sig_in_handler = 1;
+    target->a0 = (u32)signum;
+    target->epc = handler;
+    target->ra = proc_table[pid].sig_trampoline;
+    return 0;
+}
+
+// SYS_SIGNAL: instala `handler` (+ su trampolín de retorno) para `signum`
+// en el proceso `pid`, devuelve el handler anterior (o SIG_ERR si signum
+// está fuera de rango — sin este chequeo, un signum negativo o gigante
+// escribiría fuera de sig_handler[NSIG]).
+u32 sched_set_sig_handler(int pid, int signum, u32 handler, u32 trampoline) {
+    if (signum <= 0 || signum >= NSIG) {
+        return (u32)SIG_ERR;
+    }
+    u32 old = proc_table[pid].sig_handler[signum];
+    proc_table[pid].sig_handler[signum] = handler;
+    proc_table[pid].sig_trampoline = trampoline;
+    return old;
+}
+
+// SYS_SIGRETURN: la llama _sig_trampoline (user/libc/signal.h) al volver de
+// un handler. Restaura el TrapFrame completo de justo antes de la señal —
+// tf queda con el epc original tal cual (el trap.c que la invoca no debe
+// hacerle el +4 de post-syscall habitual, ver el "return" en su case).
+void sched_sigreturn(TrapFrame *tf, int pid) {
+    if (!proc_table[pid].sig_in_handler) {
+        return; // no-op defensivo: nadie entregó una señal con handler pendiente
+    }
+    tf_copy(tf, &proc_table[pid].sig_saved_ctx);
+    proc_table[pid].sig_in_handler = 0;
 }
 
 void sched_exit_current(TrapFrame *tf) {
@@ -285,7 +374,21 @@ int sched_spawn(const char *path, u32 arg0) {
     // borrarlo). eret limpia EXL solo, al ejecutarse.
     ctx->status = STATUS_BEV | STATUS_IE | STATUS_IM2 | STATUS_IM7 | STATUS_KSU_USER | STATUS_EXL;
 
+    // Señales a SIG_DFL: si este slot lo tuvo otro proceso antes, sin esto
+    // el nuevo heredaría los handlers (y hasta el sig_in_handler) del que
+    // ocupaba el slot previamente.
+    for (int i = 0; i < NSIG; i++) {
+        proc_table[slot].sig_handler[i] = (u32)SIG_DFL;
+    }
+    proc_table[slot].sig_trampoline = 0;
+    proc_table[slot].sig_in_handler = 0;
+
     proc_table[slot].state = PROC_READY;
+    // Este es el nuevo "foreground": Ctrl+C apunta al último comando que se
+    // arrancó desde el shell (ver sched_signal_fg). fork() NO pisa esto —
+    // un hijo creado por sys_fork es parte del mismo comando, no un nuevo
+    // foreground propio.
+    fg_pid = slot;
     return slot;
 }
 
@@ -328,6 +431,15 @@ int sched_fork(TrapFrame *tf) {
     tf_copy(&child->ctx, tf); // mismos registros que el padre en este instante...
     child->ctx.v0 = 0;        // ...salvo el retorno de fork(): 0 en el hijo
     child->ctx.epc = tf->epc + 4; // no reejecutar el syscall (igual que el padre, ver trap.c)
+    // Señales a SIG_DFL en el hijo: no las hereda del padre (a diferencia
+    // del fork() real de POSIX) ni del ocupante previo del slot — más
+    // simple que copiarlas, y ningún test/programa de este proyecto instala
+    // un handler antes de forkear, así que no hay caso real que lo necesite.
+    for (int i = 0; i < NSIG; i++) {
+        child->sig_handler[i] = (u32)SIG_DFL;
+    }
+    child->sig_trampoline = 0;
+    child->sig_in_handler = 0;
     child->state = PROC_READY;
 
     return slot; // el padre recibe el pid del hijo (lo pisa trap.c en tf->v0)

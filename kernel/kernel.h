@@ -134,10 +134,12 @@ void console_flush(void); // recompone el texto sobre el FB (gpu_flip)
 
 // trap.c
 void kernel_trap(TrapFrame *tf);
-void keyboard_irq(void);
+void keyboard_irq(TrapFrame *tf);
 void timer_tick(TrapFrame *tf);
 int gpu_owned_by_user(void); // 1 si un proceso tiene la pantalla (ver sys_gpu_init)
-void gpu_force_release(void); // Ctrl+C: la devuelve a la consola aunque el dueño no haya salido solo
+// sched_signal_fg: libera la GPU sólo si el proceso que se mató por señal
+// (acción default, sin handler instalado) era justo el dueño.
+void gpu_release_if_owner(int pid);
 
 // shell.c
 void shell_init(void);
@@ -192,7 +194,14 @@ void sched_wake(int pid);                // lo despierta (sem_signal)
 int sched_spawn(const char *path, u32 arg0); // lee+parsea el ELF de disco; slot o -1
 int sched_fork(TrapFrame *tf); // duplica al proceso actual; pid del hijo (o -1) para el padre
 void sched_exit_current(TrapFrame *tf);      // usan SYS_EXIT y el kill por fallo
-void sched_kill_all_user(void);              // Ctrl+C: corta todo lo que no sea el shell
+void sched_kill_pid(TrapFrame *tf, int pid); // termina un pid puntual (acción default de una señal)
+
+// Señales (ver sched.c y user/libc/signal.h): sólo SIGINT hoy, entregada al
+// proceso en foreground (el último que arrancó sched_spawn) en vez de
+// matarlos a todos como antes.
+int sched_signal_fg(TrapFrame *tf, int signum); // Ctrl+C; devuelve el pid matado por acción default, o 0
+u32 sched_set_sig_handler(int pid, int signum, u32 handler, u32 trampoline); // SYS_SIGNAL
+void sched_sigreturn(TrapFrame *tf, int pid);                               // SYS_SIGRETURN
 
 // sem.c: semáforos de Dijkstra (wait/signal), bloqueantes de verdad — sin
 // busy-wait, sched_block_current/sched_wake sacan y devuelven al proceso
@@ -216,7 +225,7 @@ int fs_open(const char *path, int write_mode, int owner_pid);
 int fs_fd_read(int fd, u8 *buf, u32 maxlen);
 int fs_fd_write(int fd, const u8 *buf, u32 len);
 int fs_fd_close(int fd);
-void fs_close_all_owned_by(int pid); // la llaman sched_exit_current/sched_kill_all_user
+void fs_close_all_owned_by(int pid); // la llaman sched_exit_current/sched_kill_pid
 
 // kernel.c
 void kernel_main(void);
