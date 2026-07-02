@@ -88,8 +88,126 @@ static inline void free(void *ptr) {
     }
 }
 
+// nmemb*size sin chequeo de overflow: mismo alcance que malloc de este
+// proyecto (bump/first-fit sin garantías más allá de "alcanza para lo que
+// se necesita hoy").
+static inline void *calloc(u32 nmemb, u32 size) {
+    u32 total = nmemb * size;
+    void *p = malloc(total);
+    if (p) {
+        u8 *b = (u8 *)p;
+        for (u32 i = 0; i < total; i++) {
+            b[i] = 0;
+        }
+    }
+    return p;
+}
+
+// Si el bloque actual ya entra, lo devuelve tal cual (no achica ni parte —
+// mismo criterio "lo simple que alcanza" que malloc/free de este archivo).
+// Si no entra, pide uno nuevo, copia y libera el viejo — sin intentar
+// crecer in-place hacia el siguiente bloque libre.
+static inline void *realloc(void *ptr, u32 size) {
+    if (!ptr) {
+        return malloc(size);
+    }
+    if (!size) {
+        free(ptr);
+        return 0;
+    }
+    block_header_t *b = (block_header_t *)((char *)ptr - sizeof(block_header_t));
+    if (b->size >= size) {
+        return ptr;
+    }
+    void *n = malloc(size);
+    if (!n) {
+        return 0;
+    }
+    u32 copy = b->size < size ? b->size : size;
+    u8 *d = (u8 *)n;
+    const u8 *s = (const u8 *)ptr;
+    for (u32 i = 0; i < copy; i++) {
+        d[i] = s[i];
+    }
+    free(ptr);
+    return n;
+}
+
 static inline int abs(int x) {
     return x < 0 ? -x : x;
+}
+
+// atoi/atol/strtol: parsing de enteros decimales (atoi/atol) o en la base
+// que se pida (strtol, con base=0 = auto-detectar "0x"/"0" como hex/octal,
+// igual que el strtol real). Sin chequeo de overflow ni de errno (este
+// proyecto no tiene errno todavía) — para eso está `endptr`, que sí
+// respeta el contrato real (apunta al primer carácter no consumido).
+static inline int atoi(const char *s) {
+    while (*s == ' ' || *s == '\t' || *s == '\n') {
+        s++;
+    }
+    int sign = 1;
+    if (*s == '-') {
+        sign = -1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+    int v = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (*s - '0');
+        s++;
+    }
+    return v * sign;
+}
+
+static inline long atol(const char *s) {
+    return (long)atoi(s); // int y long son los dos de 32 bits en este target
+}
+
+static inline long strtol(const char *s, char **endptr, int base) {
+    while (*s == ' ' || *s == '\t' || *s == '\n') {
+        s++;
+    }
+    int sign = 1;
+    if (*s == '-') {
+        sign = -1;
+        s++;
+    } else if (*s == '+') {
+        s++;
+    }
+    if ((base == 0 || base == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16;
+        s += 2;
+    } else if (base == 0 && s[0] == '0') {
+        base = 8;
+        s++;
+    } else if (base == 0) {
+        base = 10;
+    }
+    long v = 0;
+    while (1) {
+        char c = *s;
+        int d;
+        if (c >= '0' && c <= '9') {
+            d = c - '0';
+        } else if (c >= 'a' && c <= 'z') {
+            d = c - 'a' + 10;
+        } else if (c >= 'A' && c <= 'Z') {
+            d = c - 'A' + 10;
+        } else {
+            break;
+        }
+        if (d >= base) {
+            break;
+        }
+        v = v * base + d;
+        s++;
+    }
+    if (endptr) {
+        *endptr = (char *)s;
+    }
+    return v * sign;
 }
 
 // sys_exit() no lleva status de salida (no hay quién lo lea todavía: sin

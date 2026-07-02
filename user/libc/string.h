@@ -16,6 +16,10 @@ typedef unsigned int u32;
 typedef int i32;
 #endif
 
+// strdup necesita malloc: único motivo de este include (stdlib.h no
+// incluye string.h de vuelta, no hay ciclo).
+#include "stdlib.h"
+
 static inline void *memcpy(void *dst, const void *src, u32 n) {
     u8 *d = (u8 *)dst;
     const u8 *s = (const u8 *)src;
@@ -112,6 +116,55 @@ static inline char *strcat(char *dst, const char *src) {
     }
     dst[i + j] = 0;
     return dst;
+}
+
+static inline char *strchr(const char *s, int c) {
+    while (*s) {
+        if (*s == (char)c) {
+            return (char *)s;
+        }
+        s++;
+    }
+    return (c == 0) ? (char *)s : 0; // c==0: strchr(s,'\0') apunta al terminador
+}
+
+static inline char *strrchr(const char *s, int c) {
+    const char *last = 0;
+    do {
+        if (*s == (char)c) {
+            last = s;
+        }
+    } while (*s++);
+    return (char *)last;
+}
+
+static inline char *strstr(const char *hay, const char *needle) {
+    if (!*needle) {
+        return (char *)hay;
+    }
+    for (; *hay; hay++) {
+        const char *h = hay;
+        const char *n = needle;
+        while (*h && *n && *h == *n) {
+            h++;
+            n++;
+        }
+        if (!*n) {
+            return (char *)hay;
+        }
+    }
+    return 0;
+}
+
+// Copia nueva (malloc + memcpy) de `s`: quien la use es responsable de
+// free()-arla, igual que el strdup real.
+static inline char *strdup(const char *s) {
+    u32 n = strlen(s) + 1;
+    char *d = (char *)malloc(n);
+    if (d) {
+        memcpy(d, s, n);
+    }
+    return d;
 }
 
 #endif // AIZ_LIBC_STRING_H
