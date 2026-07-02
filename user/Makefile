@@ -9,11 +9,11 @@ ELF_FMT   = elf32-little
 CFLAGS  = -target $(ARCH) -mips32 -ffreestanding -fno-pic -fno-builtin \
           -fomit-frame-pointer -G0 -O2 -nostdlib -static -Wall
 
-PROGRAMS = hello ping pingpong cube3d filetest memtest sigtest fopentst fputest
+PROGRAMS = hello ping pingpong cube3d filetest memtest sigtest fopentst fputest audiotst
 
 all: $(PROGRAMS:%=%.bin)
 
-LIBC_HDRS = libc/string.h libc/stdlib.h libc/stdio.h libc/unistd.h libc/signal.h
+LIBC_HDRS = libc/string.h libc/stdlib.h libc/stdio.h libc/unistd.h libc/signal.h libc/audio.h
 
 %.o: %.c ../kernel/abi.h ../kernel/gpu_math.h gpu_user.h $(LIBC_HDRS)
 	$(CLANG) $(CFLAGS) -c $< -o $@

@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use aiz32mips_core::cop::CAUSE_IP2;
 use aiz32mips_core::cpu::CPU;
+use aiz32mips_core::devices::audio::AudioMmio;
 use aiz32mips_core::devices::gpu::{self, GpuMmio};
 use aiz32mips_core::devices::keyboard::KeyboardMmio;
 use aiz32mips_core::devices::storage::StorageMmio;
@@ -132,6 +133,9 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("no pude abrir el disco '{}': {}", disk_img_path, e))?;
     bus.add_device(Box::new(storage));
 
+    // === audio ===
+    bus.add_device(Box::new(AudioMmio::new(AUDIO_MMIO_PHYS)));
+
     // Config inicial: 320x200, framebuffer único (sin double buffer todavía)
     write16(&mut bus, REG_FB_WIDTH, 320);
     write16(&mut bus, REG_FB_HEIGHT, 200);
@@ -250,7 +254,11 @@ fn blit_segment(ram: &mut [u8], rom: &mut [u8], paddr: u32, data: &[u8]) -> anyh
 }
 
 // Junta los eventos de SDL: le pasa las teclas al KeyboardMmio y refleja su
-// IRQ en Cause.IP2 (nivel, no flanco). Devuelve true si hay que salir.
+// IRQ en Cause.IP2 (nivel, no flanco). De paso drena lo que el kernel haya
+// encolado en AudioMmio hacia la salida de audio real — misma cadencia que
+// el teclado (cada poll_every instrucciones, ver el loop principal), más
+// seguido que el present() a 60fps para no acumular demasiada latencia.
+// Devuelve true si hay que salir.
 fn poll_input(sdl: &mut SdlDisplay, bus: &mut MemoryBus, cpu: &mut CPU) -> bool {
     let pump = sdl.pump_events();
     if let Some(kbd) = bus.device_mut::<KeyboardMmio>() {
@@ -262,6 +270,10 @@ fn poll_input(sdl: &mut SdlDisplay, bus: &mut MemoryBus, cpu: &mut CPU) -> bool 
         } else {
             cpu.cop0.clear_cause_bit(CAUSE_IP2);
         }
+    }
+    if let Some(audio) = bus.device_mut::<AudioMmio>() {
+        let samples = audio.drain(8192);
+        sdl.push_audio_samples(&samples);
     }
     pump.quit
 }

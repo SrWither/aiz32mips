@@ -6,6 +6,7 @@ use std::fs;
 
 use aiz32mips_core::cop::CAUSE_IP2;
 use aiz32mips_core::cpu::CPU;
+use aiz32mips_core::devices::audio::AudioMmio;
 use aiz32mips_core::devices::gpu::{self, GpuMmio};
 use aiz32mips_core::devices::keyboard::{self, KeyboardMmio};
 use aiz32mips_core::devices::storage::StorageMmio;
@@ -82,6 +83,8 @@ fn main() {
     let storage = StorageMmio::new(0x1F80_3000, std::path::Path::new(&disk_path))
         .expect("no pude abrir/crear el disco de DISK_IMG");
     bus.add_device(Box::new(storage));
+
+    bus.add_device(Box::new(AudioMmio::new(0x1F80_4000)));
 
     // Inyección de teclado sintética para probar sin SDL:
     //   KBD_TEXT=abc      -> eventos de texto (kind=1), uno por char
@@ -198,4 +201,8 @@ fn main() {
         }
     }
     println!("pixeles distintos del de (0,0): {distinct_non_bg}");
+
+    if let Some(audio) = bus.device_mut::<AudioMmio>() {
+        println!("audio: samples pendientes en la cola = {}", audio.pending());
+    }
 }

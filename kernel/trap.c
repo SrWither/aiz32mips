@@ -1,5 +1,6 @@
 // trap.c — dispatch de excepciones: interrupciones (timer/teclado),
 // syscalls, y panic genérico para todo lo demás.
+#include "audio.h"
 #include "gpu.h"
 #include "keyboard.h"
 #include "kernel.h"
@@ -38,6 +39,21 @@ void gpu_release_if_owner(int pid) {
     }
 }
 
+// Mismo patrón que gfx_owner_pid, para el último proceso que sometió
+// audio (ver SYS_AUDIO_SUBMIT), pero OJO: a diferencia de la GPU, esto
+// sólo se usa en salidas ANORMALES (Ctrl+C, excepción) — un SYS_EXIT
+// normal NO llama a esto (ver ese case), porque el audio ya sometido es
+// trabajo terminado esperando reproducirse ("someto un sonido y salgo" es
+// el patrón normal, no un caso raro a limpiar).
+static int audio_owner_pid = -1;
+
+void audio_release_if_owner(int pid) {
+    if (pid == audio_owner_pid) {
+        REG_AUDIO_CTRL = 0; // corta y vacía la cola de reproducción (ver AudioMmio::write8)
+        audio_owner_pid = -1;
+    }
+}
+
 static void handle_syscall(TrapFrame *tf) {
     switch (tf->v0) {
         case SYS_PUTC:
@@ -59,6 +75,12 @@ static void handle_syscall(TrapFrame *tf) {
             if (sched_current_pid() == gfx_owner_pid) {
                 gfx_release();
             }
+            // A diferencia de la GPU (un modo activo que no tiene sentido
+            // seguir "renderizando" sin nadie mandando frames), el audio ya
+            // sometido es trabajo terminado esperando reproducirse: cortarlo
+            // acá rompería el patrón normal de "someto un sonido y salgo"
+            // (ver user/audiotst.c) — sólo se corta en una salida ANORMAL
+            // (Ctrl+C, excepción; ver sched_signal_fg/kill_user_process).
             sched_exit_current(tf);
             return; // sin el epc+=4 de abajo: ya apunta donde corresponde
         case SYS_SEM_WAIT:
@@ -91,6 +113,34 @@ static void handle_syscall(TrapFrame *tf) {
             break;
         case SYS_LSEEK:
             tf->v0 = (u32)fs_fd_seek((int)tf->a0, (i32)tf->a1, (int)tf->a2);
+            break;
+        case SYS_AUDIO_SUBMIT: {
+            // tf->a0 es un puntero kuseg del proceso (mismo motivo que
+            // SYS_GPU_SUBMIT/SYS_OPEN: el ASID/TLB activo en este preciso
+            // momento siguen siendo los suyos). Se trocea en tandas de
+            // AUDIO_BUF_SAMPLES porque el staging del device sólo tiene
+            // lugar para eso de una — igual que gpu_submit con VRAM_CMDBUF.
+            const short *src = (const short *)tf->a0;
+            u32 n = tf->a1;
+            audio_owner_pid = sched_current_pid();
+            REG_AUDIO_CTRL = 1; // por si un audio_release_if_owner anterior lo había apagado
+            u32 done = 0;
+            while (done < n) {
+                u32 chunk = n - done;
+                if (chunk > AUDIO_BUF_SAMPLES) {
+                    chunk = AUDIO_BUF_SAMPLES;
+                }
+                for (u32 i = 0; i < chunk; i++) {
+                    AUDIO_BUF[i] = src[done + i];
+                }
+                REG_AUDIO_LEN = chunk;
+                REG_AUDIO_KICK = 1;
+                done += chunk;
+            }
+            break;
+        }
+        case SYS_AUDIO_STATUS:
+            tf->v0 = REG_AUDIO_STATUS;
             break;
         case SYS_SIGNAL:
             tf->v0 = sched_set_sig_handler(sched_current_pid(), (int)tf->a0, tf->a1, tf->a2);
@@ -178,6 +228,7 @@ void keyboard_irq(TrapFrame *tf) {
                 int killed_pid = sched_signal_fg(tf, SIGINT);
                 if (killed_pid > 0) {
                     gpu_release_if_owner(killed_pid);
+                    audio_release_if_owner(killed_pid);
                 }
                 shell_input((char)3);
             }
@@ -207,6 +258,7 @@ static void kill_user_process(TrapFrame *tf, u32 exc_code) {
     if (sched_current_pid() == gfx_owner_pid) {
         gfx_release();
     }
+    audio_release_if_owner(sched_current_pid());
     console_putc('\n');
     console_puts("[user] proceso terminado por excepcion: ");
     console_puts(exc_name(exc_code));

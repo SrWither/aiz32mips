@@ -140,6 +140,10 @@ int gpu_owned_by_user(void); // 1 si un proceso tiene la pantalla (ver sys_gpu_i
 // sched_signal_fg: libera la GPU sólo si el proceso que se mató por señal
 // (acción default, sin handler instalado) era justo el dueño.
 void gpu_release_if_owner(int pid);
+// Mismo criterio que gpu_release_if_owner, para el último proceso que
+// sometió audio (ver SYS_AUDIO_SUBMIT): corta y vacía la cola de
+// reproducción si el que se mató era justo el dueño.
+void audio_release_if_owner(int pid);
 
 // shell.c
 void shell_init(void);

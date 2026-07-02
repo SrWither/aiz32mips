@@ -1,3 +1,4 @@
+pub mod audio;
 pub mod gpu;
 pub mod keyboard;
 pub mod ram;

@@ -48,3 +48,15 @@ pub const REG_STORAGE_BLOCK: u32 = STORAGE_MMIO_BASE + 0x00; // u32, número de 
 pub const REG_STORAGE_CMD: u32 = STORAGE_MMIO_BASE + 0x04; // u32, 1=leer bloque→buffer 2=escribir buffer→bloque
 pub const REG_STORAGE_STATUS: u32 = STORAGE_MMIO_BASE + 0x08; // u32, bit0 = error (bloque fuera de rango)
 pub const REG_STORAGE_BUF: u32 = STORAGE_MMIO_BASE + 0x200; // 512 bytes, legibles/escribibles como RAM
+
+// ───────────────────────────── Audio ────────────────────────────────────
+// Un canal, PCM mono s16 a aiz32mips_core::devices::audio::SAMPLE_RATE fijo
+// (ver ese módulo). Mismo patrón "submit al staging + kick" que la GPU.
+pub const AUDIO_MMIO_PHYS: u32 = 0x1F80_4000;
+pub const AUDIO_MMIO_BASE: u32 = 0xA000_0000 + AUDIO_MMIO_PHYS; // 0xBF80_4000, kseg1
+
+pub const REG_AUDIO_LEN: u32 = AUDIO_MMIO_BASE + 0x00; // u32, samples válidos en AUDIO_BUF para el próximo KICK
+pub const REG_AUDIO_KICK: u32 = AUDIO_MMIO_BASE + 0x04; // u8, cualquier escritura encola AUDIO_BUF[0..LEN]
+pub const REG_AUDIO_STATUS: u32 = AUDIO_MMIO_BASE + 0x08; // u32, samples pendientes en la cola de reproducción
+pub const REG_AUDIO_CTRL: u32 = AUDIO_MMIO_BASE + 0x0C; // u8, bit0 = enable (0 corta y vacía la cola)
+pub const REG_AUDIO_BUF: u32 = AUDIO_MMIO_BASE + 0x200; // STAGING_SAMPLES x s16, legible/escribible como RAM

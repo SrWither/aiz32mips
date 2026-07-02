@@ -1,4 +1,5 @@
 use sdl2::EventPump;
+use sdl2::audio::{AudioQueue, AudioSpecDesired};
 use sdl2::render::TextureCreator;
 use sdl2::video::WindowContext;
 use sdl2::{Sdl, pixels::PixelFormatEnum, rect::Rect, video::Window};
@@ -78,6 +79,7 @@ pub struct SdlDisplay {
     cur_w: u32,
     cur_h: u32,
     scale: u32,
+    audio_queue: AudioQueue<i16>,
 }
 
 impl SdlDisplay {
@@ -113,6 +115,25 @@ impl SdlDisplay {
             .map_err(|e| anyhow::anyhow!("SDL event pump error: {}", e))?;
         video.text_input().start(); // sin esto no llegan Event::TextInput
 
+        // Un canal, s16, al SAMPLE_RATE fijo que espera AudioMmio (ver
+        // aiz32mips_core::devices::audio) — nada de resamplear ni mezclar,
+        // lo que el kernel somete sale tal cual. AudioQueue en vez de un
+        // callback: encaja con el loop principal ya síncrono de main.rs
+        // (mismo criterio que el resto del host, sin threads de audio
+        // aparte).
+        let audio_subsystem = sdl
+            .audio()
+            .map_err(|e| anyhow::anyhow!("SDL audio error: {}", e))?;
+        let audio_spec = AudioSpecDesired {
+            freq: Some(aiz32mips_core::devices::audio::SAMPLE_RATE as i32),
+            channels: Some(1),
+            samples: None,
+        };
+        let audio_queue: AudioQueue<i16> = audio_subsystem
+            .open_queue(None, &audio_spec)
+            .map_err(|e| anyhow::anyhow!("SDL audio queue error: {}", e))?;
+        audio_queue.resume();
+
         Ok(Self {
             sdl,
             event_pump,
@@ -122,7 +143,18 @@ impl SdlDisplay {
             cur_w: 0,
             cur_h: 0,
             scale: initial_scale.max(1),
+            audio_queue,
         })
+    }
+
+    /// Manda samples PCM s16 ya drenados de AudioMmio (ver
+    /// devices::audio::AudioMmio::drain, la llama main.rs) a la salida de
+    /// audio real.
+    pub fn push_audio_samples(&mut self, samples: &[i16]) {
+        if samples.is_empty() {
+            return;
+        }
+        let _ = self.audio_queue.queue_audio(samples);
     }
 
     fn read_regs(bus: &mut MemoryBus) -> anyhow::Result<(u32, u32, u32)> {

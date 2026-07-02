@@ -45,6 +45,13 @@
 #define SEEK_CUR 1
 #define SEEK_END 2
 
+// Audio: un canal PCM mono s16 a AUDIO_SAMPLE_RATE fijo (ver
+// kernel/audio.h). Igual que la GPU, userland no tiene acceso directo al
+// MMIO (kseg1, sin TLB) — sys_audio_submit copia el buffer del proceso al
+// staging del device y dispara KICK, troceando si hace falta.
+#define SYS_AUDIO_SUBMIT 17
+#define SYS_AUDIO_STATUS 18
+
 static inline void sys_putc(char c) {
     register unsigned int r4 __asm__("$4") = (unsigned int)(unsigned char)c;
     register unsigned int r2 __asm__("$2") = SYS_PUTC;
@@ -170,6 +177,25 @@ static inline int sys_lseek(int fd, int offset, int whence) {
     register unsigned int r2 __asm__("$2") = SYS_LSEEK;
     __asm__ volatile("syscall" : "+r"(r2) : "r"(r4), "r"(r5), "r"(r6) : "memory");
     return (int)r2;
+}
+
+// Somete hasta `n` samples s16 (mono, AUDIO_SAMPLE_RATE) para reproducir,
+// en el orden dado. Sin retorno de "cuántos entraron": el kernel siempre
+// los encola todos (troceando en tandas de AUDIO_BUF_SAMPLES si hace
+// falta, ver kernel/trap.c) — sys_audio_status() es la forma de no
+// mandar de más si no hace falta.
+static inline void sys_audio_submit(const short *samples, unsigned int n) {
+    register unsigned int r4 __asm__("$4") = (unsigned int)samples;
+    register unsigned int r5 __asm__("$5") = n;
+    register unsigned int r2 __asm__("$2") = SYS_AUDIO_SUBMIT;
+    __asm__ volatile("syscall" : : "r"(r4), "r"(r5), "r"(r2) : "memory");
+}
+
+// Samples todavía sin reproducir en la cola del device (REG_AUDIO_STATUS).
+static inline unsigned int sys_audio_status(void) {
+    register unsigned int r2 __asm__("$2") = SYS_AUDIO_STATUS;
+    __asm__ volatile("syscall" : "+r"(r2) : : "memory");
+    return r2;
 }
 
 typedef void (*sighandler_t)(int);
