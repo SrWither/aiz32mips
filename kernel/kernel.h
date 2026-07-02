@@ -169,6 +169,15 @@ void shell_input(char c);
 // que no haya que mantener el mismo número en dos lugares.
 #define MAX_PROCS 4
 
+// Tope de un componente de path (nombre de archivo o directorio, sin las
+// '/'), en caracteres + '\0'. Compartido entre fs.c (VFAT/LFN: hasta acá
+// entra un nombre largo, ver fat_lfn_accumulate) y shell.c (resolve_path:
+// sus buffers por-componente tienen que ser al menos así de grandes, o un
+// nombre largo se trunca ahí ANTES de llegar a fs.c — así se manifestó la
+// primera vez, con "a_really_long_filename.txt" quedando cortado a 15
+// caracteres por un `char comp[16]` viejo, de la época sin VFAT).
+#define FS_MAX_LONGNAME 64
+
 // mm.c: memoria física + mecánica de TLB, sin política de proceso (eso es
 // de sched.c).
 u32 pmm_alloc_page(void);

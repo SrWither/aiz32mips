@@ -118,7 +118,11 @@ static void resolve_path(char *out, u32 outmax, const char *in) {
     }
     merged[mi] = 0;
 
-    char comps[8][16];
+    // FS_MAX_LONGNAME (kernel.h): tiene que coincidir con lo que fs.c
+    // soporta de verdad (VFAT/LFN) — un buffer más chico acá truncaría un
+    // nombre largo ANTES de que le llegue a fs.c, así se manifestó la
+    // primera vez (ver el comentario en kernel.h).
+    char comps[8][FS_MAX_LONGNAME];
     int ncomps = 0;
     u32 i = 0;
     while (merged[i]) {
@@ -128,9 +132,9 @@ static void resolve_path(char *out, u32 outmax, const char *in) {
         if (!merged[i]) {
             break;
         }
-        char comp[16];
+        char comp[FS_MAX_LONGNAME];
         int ci = 0;
-        while (merged[i] && merged[i] != '/' && ci < 15) {
+        while (merged[i] && merged[i] != '/' && ci < FS_MAX_LONGNAME - 1) {
             comp[ci++] = merged[i++];
         }
         comp[ci] = 0;
@@ -141,7 +145,7 @@ static void resolve_path(char *out, u32 outmax, const char *in) {
                 ncomps--;
             }
         } else if (ncomps < 8) {
-            str_copy(comps[ncomps], comp, 16);
+            str_copy(comps[ncomps], comp, FS_MAX_LONGNAME);
             ncomps++;
         }
     }
