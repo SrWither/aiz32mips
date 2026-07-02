@@ -14,15 +14,37 @@ typedef enum {
     PROC_BLOCKED, // esperando un semáforo (sem.c); fuera de la rotación
 } proc_state_t;
 
+// ELF_MAX_SEGS: definido más abajo junto al resto del parser de ELF, pero
+// la struct hace falta acá arriba porque Process guarda una copia por
+// proceso (para poder re-leer el texto del ELF a demanda, ver
+// sched_load_text_page). Se declara antes de Process, en vez de mover
+// Process más abajo, para no reordenar el resto del archivo.
+#define ELF_MAX_SEGS 4
+
+typedef struct {
+    u32 vaddr;
+    u32 offset;
+    u32 filesz;
+    u32 memsz;
+} ElfSeg;
+
 typedef struct {
     TrapFrame ctx;
     proc_state_t state;
-    // Las 2 páginas wired del proceso (texto+stack, ver mm_map_user):
-    // sched_spawn las calcula pero antes las tiraba después de mapearlas —
-    // sched_fork necesita poder leerlas de vuelta para saber qué copiarle
-    // al hijo. El heap NO vive acá: es de mm.c (mm_fork_heap), tiene su
-    // propia tabla de páginas por ASID.
-    u32 prog_phys, stack_phys;
+    // Ya no hay una página física fija de texto (prog_phys): texto/datos/
+    // bss son demand-paged igual que el heap (ver mm.c::text_page_table),
+    // re-leídos del ELF en disco página por página (sched_load_text_page).
+    // Lo que sched_spawn necesita conservar por proceso para eso es la
+    // ruta del ELF y sus segmentos PT_LOAD — sched_fork copia estos 3
+    // campos tal cual del padre al hijo (mismo binario, mismos offsets).
+    char elf_path[96];
+    ElfSeg text_segs[ELF_MAX_SEGS];
+    int n_text_segs;
+    // El stack SÍ sigue siendo una página física fija y wired (ver
+    // mm_map_user) — sched_fork necesita poder leerla de vuelta para
+    // saber qué copiarle al hijo. El heap NO vive acá: es de mm.c
+    // (mm_fork_heap), tiene su propia tabla de páginas por ASID.
+    u32 stack_phys;
     // Señales (ver sched_signal_fg/sched_set_sig_handler/sched_sigreturn):
     // sig_handler[n] es SIG_DFL(0)/SIG_IGN(1)/una dirección de handler de
     // usuario para la señal n. sig_trampoline es la dirección (fija, la
@@ -232,21 +254,27 @@ void sched_exit_current(TrapFrame *tf) {
 // ─────────────────────── carga de ELF32/MIPS desde disco ──────────────────
 // Parser mínimo, hermano en espíritu del de aiz32mips_core::elf (que corre
 // del lado host para bootear el propio kernel.elf): acá no hay Vec ni std,
-// así que un tope fijo de PT_LOAD alcanza y sobra para binarios que caben
-// en una sola página física (multi-página queda para cuando haya TLB
-// refill de verdad).
-#define ELF_MAX_SEGS 4
+// así que un tope fijo de PT_LOAD alcanza y sobra (la cabecera del ELF —
+// hasta ELF_BUF_SIZE bytes — es lo único que hace falta leer entera acá;
+// el contenido de cada PT_LOAD se re-lee del disco a demanda, página por
+// página, ver sched_load_text_page).
+// ElfSeg está declarada arriba, junto a Process (sched_fork necesita
+// copiar text_segs[] del padre al hijo).
 #define ELF_BUF_SIZE 8192
 
 #define ELF_PT_LOAD 1u
 #define ELF_EM_MIPS 8u
 
-typedef struct {
-    u32 vaddr;
-    u32 offset;
-    u32 filesz;
-    u32 memsz;
-} ElfSeg;
+// Copia acotada de string, sin depender de libc (mismo patrón que
+// shell.c::str_copy / fs.c::fs_str_copy — cada archivo tiene el suyo en
+// este proyecto, no hay una versión compartida).
+static void str_copy(char *dst, const char *src, int maxlen) {
+    int i = 0;
+    for (; i < maxlen - 1 && src[i]; i++) {
+        dst[i] = src[i];
+    }
+    dst[i] = '\0';
+}
 
 static u16 elf_rd16(const u8 *b, u32 off) {
     return (u16)(b[off] | (b[off + 1] << 8));
@@ -290,7 +318,12 @@ static int elf_parse(const u8 *data, u32 len, u32 *entry, ElfSeg *segs, int *nse
         s->vaddr = elf_rd32(data, ph + 8);
         s->filesz = elf_rd32(data, ph + 16);
         s->memsz = elf_rd32(data, ph + 20);
-        if (s->offset + s->filesz > len) {
+        // Invariante básica del formato ELF, no una validación contra
+        // `len`: `data` acá es solo la cabecera (hasta ELF_BUF_SIZE bytes,
+        // ver sched_spawn), el contenido real de cada PT_LOAD se re-lee
+        // del disco a demanda (sched_load_text_page), así que puede ser
+        // mucho más grande que `len` sin que eso sea un error.
+        if (s->filesz > s->memsz) {
             return -1;
         }
         (*nsegs)++;
@@ -326,38 +359,50 @@ int sched_spawn(const char *path, u32 arg0) {
     if (elf_parse(elf_buf, (u32)n, &entry, segs, &nsegs) < 0) {
         return -1;
     }
-
-    u32 prog_phys = pmm_alloc_page();
-    u32 stack_phys = pmm_alloc_page();
-    pmm_write_page(prog_phys, 0, 0); // huecos entre segmentos y bss: en 0
     for (int i = 0; i < nsegs; i++) {
-        // Todo PT_LOAD tiene que caer dentro de la única página de
-        // texto+datos del proceso (el stack es página aparte, el heap ni
-        // eso — ver mm.c): un ELF armado a mano o corrupto que pise esto
-        // se rechaza acá en vez de corromper la página de al lado.
+        // Todo PT_LOAD tiene que caer dentro de la región de texto/datos/
+        // bss demand-paged del proceso (el stack vive en su propia región
+        // aparte, el heap ni eso — ver mm.c/kernel.h): un ELF armado a
+        // mano o corrupto que pise esto se rechaza acá, antes de guardar
+        // nada, en vez de fallar más tarde a mitad de un page fault.
         if (segs[i].vaddr < USER_VADDR) {
             return -1;
         }
         u32 seg_off = segs[i].vaddr - USER_VADDR;
-        if (seg_off + segs[i].memsz > 0x1000u) {
+        if (seg_off + segs[i].memsz > USER_TEXT_SIZE) {
             return -1;
         }
-        pmm_write_page_at(prog_phys, seg_off, elf_buf + segs[i].offset, segs[i].filesz);
     }
+
+    // Ya no se copia el contenido del ELF a una página física acá: texto/
+    // datos/bss son demand-paged (ver mm.c::text_page_get_or_alloc), así
+    // que lo único que hace falta guardar por proceso es de dónde re-leer
+    // cada página cuando se toque por primera vez (sched_load_text_page).
+    u32 stack_phys = pmm_alloc_page();
     pmm_write_page(stack_phys, 0, 0);
-    // mm_reset_heap ANTES de mapear: si este slot lo tuvo otro proceso
-    // antes, hay que limpiar su tabla de páginas de heap y tirar abajo
-    // cualquier entrada de TLB que le hubiera quedado viva con este mismo
-    // ASID (ver el comentario de mm_reset_heap) — si no, el proceso nuevo
-    // podría heredar heap ajeno.
-    mm_reset_heap((u32)slot);
+    // mm_reset_process ANTES de mapear: si este slot lo tuvo otro proceso
+    // antes, hay que limpiar sus tablas de páginas (texto+heap) y tirar
+    // abajo cualquier entrada de TLB que le hubiera quedado viva con este
+    // mismo ASID (ver el comentario de mm_reset_process) — si no, el
+    // proceso nuevo podría heredar texto o heap ajenos.
+    mm_reset_process((u32)slot);
     // A diferencia de sched_switch_to, esto SÍ puede escribir EntryHi
     // directo: spawn siempre corre en contexto del shell (proceso 0), cuyo
     // propio stack vive en kseg1 (no traducido), así que no hay ventana de
     // desenrolle afectada por el ASID que quede puesto.
-    mm_map_user((u32)slot, prog_phys, stack_phys);
-    proc_table[slot].prog_phys = prog_phys;
+    mm_map_user((u32)slot, stack_phys);
     proc_table[slot].stack_phys = stack_phys;
+    str_copy(proc_table[slot].elf_path, path, (int)sizeof(proc_table[slot].elf_path));
+    proc_table[slot].n_text_segs = nsegs;
+    for (int i = 0; i < nsegs; i++) {
+        // Campo a campo, no `=`: una struct asignada entera baja a un
+        // memcpy que no existe en este build sin libc (mismo motivo que
+        // tf_copy más arriba, ver su comentario).
+        proc_table[slot].text_segs[i].vaddr = segs[i].vaddr;
+        proc_table[slot].text_segs[i].offset = segs[i].offset;
+        proc_table[slot].text_segs[i].filesz = segs[i].filesz;
+        proc_table[slot].text_segs[i].memsz = segs[i].memsz;
+    }
 
     TrapFrame *ctx = &proc_table[slot].ctx;
     u32 *words = (u32 *)ctx;
@@ -392,8 +437,37 @@ int sched_spawn(const char *path, u32 arg0) {
     return slot;
 }
 
-// fork(): duplica al proceso actual (4 páginas físicas copiadas enteras,
-// sin copy-on-write — ver pmm_copy_page) en un slot nuevo, con el mismo
+// La llama mm.c (mm_handle_page_fault → text_page_get_or_alloc) cuando el
+// proceso `asid` toca por primera vez una página de texto/datos/bss:
+// rellena `dst` (PAGE_SIZE bytes, puntero kseg0 de la página física recién
+// asignada) con los bytes reales del ELF en disco, y deja el resto en
+// cero — cubre tanto huecos entre segmentos como bss más allá de filesz.
+void sched_load_text_page(u32 asid, u32 page_vaddr, u8 *dst) {
+    Process *p = &proc_table[asid];
+    for (u32 i = 0; i < 0x1000u; i++) {
+        dst[i] = 0;
+    }
+    u32 page_off = page_vaddr - USER_VADDR;
+    for (int i = 0; i < p->n_text_segs; i++) {
+        ElfSeg *s = &p->text_segs[i];
+        u32 seg_off = s->vaddr - USER_VADDR;
+        u32 seg_file_end = seg_off + s->filesz;
+        // Intersección entre [page_off, page_off+PAGE_SIZE) (esta página)
+        // y [seg_off, seg_file_end) (la parte de ESTE segmento que tiene
+        // bytes reales en el archivo — más allá de eso es bss, ya en cero
+        // por el memset de arriba).
+        u32 lo = (page_off > seg_off) ? page_off : seg_off;
+        u32 hi = (page_off + 0x1000u < seg_file_end) ? page_off + 0x1000u : seg_file_end;
+        if (lo < hi) {
+            u32 file_off = s->offset + (lo - seg_off);
+            fs_read_at(p->elf_path, file_off, dst + (lo - page_off), hi - lo);
+        }
+    }
+}
+
+// fork(): duplica al proceso actual (páginas físicas ya tocadas de texto/
+// heap, más el stack entero, copiadas sin copy-on-write — ver
+// pmm_copy_page/mm_fork_text/mm_fork_heap) en un slot nuevo, con el mismo
 // contexto de registros que tenía en el momento del syscall. El único
 // dato que difiere entre padre e hijo es v0 (valor de retorno de fork):
 // el padre lo pisa afuera, en trap.c, con el pid que devolvemos acá; al
@@ -411,23 +485,32 @@ int sched_fork(TrapFrame *tf) {
     }
 
     Process *parent = &proc_table[current_pid];
-    u32 prog_phys = pmm_alloc_page();
     u32 stack_phys = pmm_alloc_page();
-    pmm_copy_page(prog_phys, parent->prog_phys);
     pmm_copy_page(stack_phys, parent->stack_phys);
-    // mm_reset_heap + mm_fork_heap: mismo motivo que en sched_spawn (este
-    // slot puede venir de un proceso anterior), pero acá además hay que
-    // copiarle al hijo el heap que el padre ya hubiera tocado.
-    mm_reset_heap((u32)slot);
+    // mm_reset_process + mm_fork_text/mm_fork_heap: mismo motivo que en
+    // sched_spawn (este slot puede venir de un proceso anterior), pero acá
+    // además hay que copiarle al hijo el texto y el heap que el padre ya
+    // hubiera tocado.
+    mm_reset_process((u32)slot);
+    mm_fork_text((u32)slot, (u32)current_pid);
     mm_fork_heap((u32)slot, (u32)current_pid);
     // Mismo comentario que en sched_spawn: fork siempre lo llama un
     // proceso corriendo (nunca el shell "desde afuera"), pero el shell
     // TAMPOCO usa TLB propio (kseg1), así que esto sigue siendo seguro.
-    mm_map_user((u32)slot, prog_phys, stack_phys);
+    mm_map_user((u32)slot, stack_phys);
 
     Process *child = &proc_table[slot];
-    child->prog_phys = prog_phys;
     child->stack_phys = stack_phys;
+    str_copy(child->elf_path, parent->elf_path, (int)sizeof(child->elf_path));
+    child->n_text_segs = parent->n_text_segs;
+    for (int i = 0; i < parent->n_text_segs; i++) {
+        // Campo a campo, no `=`: mismo motivo que en sched_spawn (sin
+        // memcpy en este build).
+        child->text_segs[i].vaddr = parent->text_segs[i].vaddr;
+        child->text_segs[i].offset = parent->text_segs[i].offset;
+        child->text_segs[i].filesz = parent->text_segs[i].filesz;
+        child->text_segs[i].memsz = parent->text_segs[i].memsz;
+    }
     tf_copy(&child->ctx, tf); // mismos registros que el padre en este instante...
     child->ctx.v0 = 0;        // ...salvo el retorno de fork(): 0 en el hijo
     child->ctx.epc = tf->epc + 4; // no reejecutar el syscall (igual que el padre, ver trap.c)

@@ -112,8 +112,8 @@ static inline void cop0_tlbwr(void) {
 }
 // TLBR: vuelca la entrada en Index hacia EntryHi/EntryLo0/EntryLo1/
 // PageMask (para poder leerla con cop0_read_entryhi después). La usa
-// mm_reset_heap para encontrar y tirar abajo entradas de un proceso que
-// ya murió, antes de que su ASID lo reuse otro.
+// mm_reset_process para encontrar y tirar abajo entradas de un proceso
+// que ya murió, antes de que su ASID lo reuse otro.
 static inline void cop0_tlbr(void) {
     __asm__ volatile("tlbr");
 }
@@ -154,15 +154,17 @@ void shell_input(char c);
 // vaddr apuntan los PT_LOAD del ELF, y dónde cae el heap que ve
 // malloc()/free() en userland — ver user/libc/stdlib.h).
 //
-// Una sola entrada de TLB *wired* por proceso para texto+stack (índice ==
-// ASID == slot, fijo desde sched_spawn/sched_fork, nunca se mueve). El
-// heap es otra historia: es grande (16MB virtuales) pero se mapea de a
-// una página de 4KB por vez, recién cuando el proceso la toca de verdad
-// (TLB refill, ver mm_handle_page_fault) — para eso no hay wired de sobra
-// (Wired=MAX_PROCS dedicados a texto+stack, el resto del TLB rota entre
-// TODOS los procesos con tlbwr).
-#define USER_VADDR 0x00400000u       // texto+datos+bss (una página, la del ELF)
-#define USER_STACK_VADDR 0x00401000u // stack: una página, crece hacia abajo desde el tope (mismo VPN2 que prog)
+// Texto+datos+bss YA NO es una sola página wired: se mapea con demanda de
+// páginas, exactamente igual que el heap (ver mm_handle_page_fault) —
+// hasta USER_TEXT_SIZE de virtuales, sin costo real hasta que el proceso
+// toca cada página (y ahí se re-lee del ELF en disco, ver
+// sched_load_text_page). El único wired por proceso que queda es el
+// stack (índice == ASID == slot, fijo desde sched_spawn/sched_fork, nunca
+// se mueve) — una región chica y separada del heap/texto para no
+// colisionar a medida que cualquiera de los dos crezca.
+#define USER_VADDR 0x00400000u      // texto+datos+bss: demand-paged, arranca acá
+#define USER_TEXT_SIZE 0x00400000u  // 4MB virtuales de techo (generoso: nada de esto es RAM real hasta tocarse)
+#define USER_STACK_VADDR 0x0F800000u // stack: una página fija (wired), lejos de texto y del heap (0x10000000+)
 
 #define USER_HEAP_VADDR 0x10000000u  // heap: región grande, con demanda de páginas (ver mm_handle_page_fault)
 #define USER_HEAP_SIZE 0x01000000u   // 16MB virtuales — nada de esto es RAM real hasta que se toca
@@ -186,13 +188,20 @@ void shell_input(char c);
 // de sched.c).
 u32 pmm_alloc_page(void);
 void pmm_write_page(u32 phys, const u8 *data, u32 len);       // pisa la página entera (resto en 0)
-void pmm_write_page_at(u32 phys, u32 offset, const u8 *data, u32 len); // solo ese rango, no toca el resto
 void pmm_copy_page(u32 dst_phys, u32 src_phys);                        // la usa sched_fork
 void mm_init(void);                                            // fija Wired al boot, antes de spawnear nada
-void mm_map_user(u32 asid, u32 prog_phys, u32 stack_phys);      // entrada wired de texto+stack
-int mm_handle_page_fault(u32 badvaddr); // TLB refill/inválida en el heap: 1 si se resolvió, 0 si no era del heap
-void mm_reset_heap(u32 asid); // limpia la tabla de páginas + invalida entradas viejas de ese ASID (spawn/fork lo reusan)
+void mm_map_user(u32 asid, u32 stack_phys);      // entrada wired del stack (texto ya no es wired, ver arriba)
+int mm_handle_page_fault(u32 badvaddr); // TLB refill/inválida en texto o heap: 1 si se resolvió, 0 si no
+void mm_reset_process(u32 asid); // limpia tablas de páginas (texto+heap) + invalida entradas viejas de ese ASID (spawn/fork lo reusan)
+void mm_fork_text(u32 child_asid, u32 parent_asid); // copia las páginas de texto ya tocadas por el padre
 void mm_fork_heap(u32 child_asid, u32 parent_asid); // copia las páginas de heap ya tocadas por el padre
+
+// sched.c: re-lee del ELF en disco (o zero-fillea si cae en bss más allá
+// de filesz) los PAGE_SIZE bytes de `page_vaddr` para el proceso `asid`.
+// La usa mm_handle_page_fault (mm.c) al asignar una página física nueva
+// de texto — mm.c no conoce el formato ELF/los segmentos, eso es de
+// sched.c (ver sched_spawn/Process.text_segs).
+void sched_load_text_page(u32 asid, u32 page_vaddr, u8 *dst);
 
 // sched.c: scheduler round-robin. El proceso 0 es el propio kernel/shell.
 // g_next_asid: el ASID del proceso elegido en el último switch; lo escribe
